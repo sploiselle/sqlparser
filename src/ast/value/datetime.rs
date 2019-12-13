@@ -150,66 +150,66 @@ impl IntervalValue {
     /// INTERVAL '1:2:3' MINUTE TO SECOND -- Err
     /// INTERVAL '1:2:3' DAY TO SECOND    -- Err
     /// ```
-    pub fn fields_match_precision(&self) -> Result<(), ValueError> {
-        let mut errors = vec![];
-        let last_field = self
-            .last_field
-            .as_ref()
-            .unwrap_or_else(|| &self.leading_field);
-        let mut extra_leading_fields = vec![];
-        let mut extra_trailing_fields = vec![];
-        // check for more data in the input string than was requested in <FIELD> TO <FIELD>
-        for field in std::iter::once(DateTimeField::Year).chain(DateTimeField::Year.into_iter()) {
-            if self.units_of(&field).is_none() {
-                continue;
-            }
+    // pub fn fields_match_precision(&self) -> Result<(), ValueError> {
+    //     let mut errors = vec![];
+    //     let last_field = self
+    //         .last_field
+    //         .as_ref()
+    //         .unwrap_or_else(|| &self.leading_field);
+    //     let mut extra_leading_fields = vec![];
+    //     let mut extra_trailing_fields = vec![];
+    //     // check for more data in the input string than was requested in <FIELD> TO <FIELD>
+    //     for field in std::iter::once(DateTimeField::Year).chain(DateTimeField::Year.into_iter()) {
+    //         if self.units_of(&field).is_none() {
+    //             continue;
+    //         }
 
-            if field < self.leading_field {
-                extra_leading_fields.push(field.clone());
-            }
-            if &field > last_field {
-                extra_trailing_fields.push(field.clone());
-            }
-        }
+    //         if field < self.leading_field {
+    //             extra_leading_fields.push(field.clone());
+    //         }
+    //         if &field > last_field {
+    //             extra_trailing_fields.push(field.clone());
+    //         }
+    //     }
 
-        if !extra_leading_fields.is_empty() {
-            errors.push(format!(
-                "The interval string '{}' specifies {}s but the significance requested is {}",
-                self.value,
-                fields_msg(extra_leading_fields.into_iter()),
-                self.leading_field
-            ));
-        }
-        if !extra_trailing_fields.is_empty() {
-            errors.push(format!(
-                "The interval string '{}' specifies {}s but the requested precision would truncate to {}",
-                self.value, fields_msg(extra_trailing_fields.into_iter()), last_field
-            ));
-        }
+    //     if !extra_leading_fields.is_empty() {
+    //         errors.push(format!(
+    //             "The interval string '{}' specifies {}s but the significance requested is {}",
+    //             self.value,
+    //             fields_msg(extra_leading_fields.into_iter()),
+    //             self.leading_field
+    //         ));
+    //     }
+    //     if !extra_trailing_fields.is_empty() {
+    //         errors.push(format!(
+    //             "The interval string '{}' specifies {}s but the requested precision would truncate to {}",
+    //             self.value, fields_msg(extra_trailing_fields.into_iter()), last_field
+    //         ));
+    //     }
 
-        // check for data requested by the <FIELD> TO <FIELD> that does not exist in the data
-        let missing_fields = match (
-            self.units_of(&self.leading_field),
-            self.units_of(&last_field),
-        ) {
-            (Some(_), Some(_)) => vec![],
-            (None, Some(_)) => vec![&self.leading_field],
-            (Some(_), None) => vec![last_field],
-            (None, None) => vec![&self.leading_field, last_field],
-        };
+    //     // check for data requested by the <FIELD> TO <FIELD> that does not exist in the data
+    //     let missing_fields = match (
+    //         self.units_of(&self.leading_field),
+    //         self.units_of(&last_field),
+    //     ) {
+    //         (Some(_), Some(_)) => vec![],
+    //         (None, Some(_)) => vec![&self.leading_field],
+    //         (Some(_), None) => vec![last_field],
+    //         (None, None) => vec![&self.leading_field, last_field],
+    //     };
 
-        if !missing_fields.is_empty() {
-            errors.push(format!(
-                "The interval string '{}' provides {} - which does not include the requested field(s) {}",
-                self.value, self.present_fields(), fields_msg(missing_fields.into_iter().cloned())));
-        }
+    //     // if !missing_fields.is_empty() {
+    //     //     errors.push(format!(
+    //     //         "The interval string '{}' provides {} - which does not include the requested field(s) {}",
+    //     //         self.value, self.present_fields(), fields_msg(missing_fields.into_iter().cloned())));
+    //     // }
 
-        if !errors.is_empty() {
-            Err(ValueError(errors.join("; ")))
-        } else {
-            Ok(())
-        }
-    }
+    //     if !errors.is_empty() {
+    //         Err(ValueError(errors.join("; ")))
+    //     } else {
+    //         Ok(())
+    //     }
+    // }
 
     fn present_fields(&self) -> String {
         fields_msg(

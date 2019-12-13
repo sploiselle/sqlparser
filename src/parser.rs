@@ -11,6 +11,9 @@
 // limitations under the License.
 
 //! SQL Parser
+//!
+use std::iter::Peekable;
+use std::str::Chars;
 
 use log::debug;
 
@@ -456,12 +459,12 @@ impl Parser {
         let tok = self.next_token();
         if let Some(Token::Word(ref k)) = tok {
             match k.keyword.as_ref() {
-                "YEAR" => Ok(DateTimeField::Year),
-                "MONTH" => Ok(DateTimeField::Month),
-                "DAY" => Ok(DateTimeField::Day),
-                "HOUR" => Ok(DateTimeField::Hour),
-                "MINUTE" => Ok(DateTimeField::Minute),
-                "SECOND" => Ok(DateTimeField::Second),
+                "YEAR" | "YEARS" => Ok(DateTimeField::Year),
+                "MONTH" | "MONTHS" => Ok(DateTimeField::Month),
+                "DAY" | "DAYS" => Ok(DateTimeField::Day),
+                "HOUR" | "HOURS" => Ok(DateTimeField::Hour),
+                "MINUTE" | "MINUTES" => Ok(DateTimeField::Minute),
+                "SECOND" | "SECONDS" => Ok(DateTimeField::Second),
                 _ => self.expected("date/time field", tok)?,
             }
         } else {
@@ -475,13 +478,14 @@ impl Parser {
         s: &str,
     ) -> Result<DateTimeField, ParserError> {
         match s {
-            "YEAR" => Ok(DateTimeField::Year),
-            "MONTH" => Ok(DateTimeField::Month),
-            "DAY" => Ok(DateTimeField::Day),
-            "HOUR" => Ok(DateTimeField::Hour),
-            "MINUTE" => Ok(DateTimeField::Minute),
-            "SECOND" => Ok(DateTimeField::Second),
-            _ => parser_err!("Expected date/time field, found: {}", s),
+            "YEAR" | "YEARS" => Ok(DateTimeField::Year),
+            "MONTH" | "MONTHS" => Ok(DateTimeField::Month),
+            "DAY" | "DAYS" => Ok(DateTimeField::Day),
+            "HOUR" | "HOURS" => Ok(DateTimeField::Hour),
+            "MINUTE" | "MINUTES" => Ok(DateTimeField::Minute),
+            // "SECOND" | "SECONDS" => Ok(DateTimeField::Second),
+            // _ => parser_err!("Expected date/time field, found: {}", s),
+            _ => Ok(DateTimeField::Second),
         }
     }
 
@@ -501,7 +505,10 @@ impl Parser {
 
     pub fn contains_date_time_str(&mut self, interval: &str) -> Result<bool, ParserError> {
         let upper_case_interval = interval.to_uppercase();
-        let date_time_strs = ["YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"];
+        let date_time_strs = [
+            "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS", "DAYS", "HOURS",
+            "MINUTES", "SECONDS",
+        ];
         for dts in &date_time_strs {
             if upper_case_interval.contains(dts) {
                 return Ok(true);
@@ -669,6 +676,16 @@ impl Parser {
         }
     }
 
+    pub fn infer_lead_from_interval(
+        chars: &mut Peekable<Chars<'_>>,
+    ) -> Result<DateTimeField, ParserError> {
+        let mut res = DateTimeField::Second;
+
+        if let
+
+
+    }
+
     /// Parse an INTERVAL literal.
     ///
     /// Some syntactically valid intervals:
@@ -696,10 +713,12 @@ impl Parser {
             let (new_raw_value, leading_field) = {
                 let split = raw_value.split(" ").collect::<Vec<&str>>();
                 if split.len() == 2 {
-                    (
-                        String::from(split[0]),
-                        self.parse_date_time_field_given_str(&split[1].to_uppercase())?,
-                    )
+                    let mut lf;
+                    if split[1].is_empty() {
+                    } else {
+                        lf = self.parse_date_time_field_given_str(&split[1].to_uppercase())?
+                    };
+                    (String::from(split[0]), lf)
                 } else {
                     return parser_err!("Invalid INTERVAL: {:#?}", raw_value);
                 }

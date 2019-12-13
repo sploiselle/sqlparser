@@ -3619,7 +3619,7 @@ fn verify_interval(
     value: IntervalValue,
     expected_computed: Interval,
     expected_duration_str: Option<&str>,
-    expected_field_match_error: Option<&str>,
+    // expected_field_match_error: Option<&str>,
 ) {
     // If there's a failure this shows every the statement verified in this
     // test, pointing out which one failed
@@ -3646,12 +3646,12 @@ fn verify_interval(
         }
         v => panic!("invalid value, expected interval for {}: {:?}", sql, v),
     }
-    match expected_field_match_error {
-        None => value
-            .fields_match_precision()
-            .unwrap_or_else(|e| panic!("unexpected precision error: {}", e)),
-        Some(msg) => assert_eq!(value.fields_match_precision().unwrap_err().to_string(), msg),
-    }
+    // match expected_field_match_error {
+    //     None => value
+    //         .fields_match_precision()
+    //         .unwrap_or_else(|e| panic!("unexpected precision error: {}", e)),
+    //     Some(msg) => assert_eq!(value.fields_match_precision().unwrap_err().to_string(), msg),
+    // }
 }
 
 /// Get an `IntervalValue` that has some reasonable defaults for test mocks
