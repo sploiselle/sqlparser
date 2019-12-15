@@ -90,43 +90,45 @@ impl IntervalValue {
                     &invalid
                 ))),
             },
-            Some(durationlike_field) => {
-                let mut seconds = 0u64;
-                match self.units_of(&durationlike_field) {
-                    Some(time) => seconds += time * seconds_multiplier(&durationlike_field),
-                    None => {
-                        return Err(ValueError(format!(
-                            "No {} provided in value string for {}",
-                            durationlike_field, self.value
-                        )))
+            None => match &self.leading_field_hms {
+                Some(durationlike_field) => {
+                    let mut seconds = 0u64;
+                    match self.units_of(&durationlike_field) {
+                        Some(time) => seconds += time * seconds_multiplier(&durationlike_field),
+                        None => {
+                            return Err(ValueError(format!(
+                                "No {} provided in value string for {}",
+                                durationlike_field, self.value
+                            )))
+                        }
                     }
-                }
-                let min_field = &self
-                    .last_field
-                    .clone()
-                    .unwrap_or_else(|| durationlike_field.clone());
-                for field in durationlike_field
-                    .clone()
-                    .into_iter()
-                    .take_while(|f| f <= min_field)
-                {
-                    if let Some(time) = self.units_of(&field) {
-                        seconds += time * seconds_multiplier(&field);
+                    let min_field = &self
+                        .last_field
+                        .clone()
+                        .unwrap_or_else(|| durationlike_field.clone());
+                    for field in durationlike_field
+                        .clone()
+                        .into_iter()
+                        .take_while(|f| f <= min_field)
+                    {
+                        if let Some(time) = self.units_of(&field) {
+                            seconds += time * seconds_multiplier(&field);
+                        }
                     }
+                    let duration = match (min_field, self.parsed.nano) {
+                        (DateTimeField::Second, Some(nanos)) => Duration::new(seconds, nanos),
+                        (_, _) => Duration::from_secs(seconds),
+                    };
+                    Ok(Interval::Duration {
+                        is_positive: self.parsed.is_positive,
+                        duration,
+                    })
                 }
-                let duration = match (min_field, self.parsed.nano) {
-                    (DateTimeField::Second, Some(nanos)) => Duration::new(seconds, nanos),
-                    (_, _) => Duration::from_secs(seconds),
-                };
-                Ok(Interval::Duration {
-                    is_positive: self.parsed.is_positive,
-                    duration,
-                })
-            }
-            None => Err(ValueError(format!(
-                "FIX ME: None catch in None => Err(ValueError(format!( {}",
-                self.value
-            ))),
+                None => Err(ValueError(format!(
+                    "No appropriate field for {}",
+                    self.value
+                ))),
+            },
         }
     }
 
