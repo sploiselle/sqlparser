@@ -11,7 +11,9 @@ pub struct IntervalValue {
     pub parsed: ParsedDateTime,
     /// The unit of the first field in the interval. `INTERVAL 'T' MINUTE`
     /// means `T` is in minutes
-    pub leading_field: DateTimeField,
+    pub leading_field_ymd: Option<DateTimeField>,
+
+    pub leading_field_hms: Option<DateTimeField>,
     /// How many digits the leading field is allowed to occupy.
     ///
     /// The interval `INTERVAL '1234' MINUTE(3)` is **illegal**, but `INTERVAL
@@ -61,8 +63,8 @@ impl IntervalValue {
     /// LAST` field is larger than the `LEAD`.
     pub fn computed_permissive(&self) -> Result<Interval, ValueError> {
         use DateTimeField::*;
-        match &self.leading_field {
-            Year => match &self.last_field {
+        match &self.leading_field_ymd {
+            Some(Year) => match &self.last_field {
                 Some(Month) => Ok(Interval::Months(
                     self.parsed.positivity() * self.parsed.year.unwrap_or(0) as i64 * 12
                         + self.parsed.month.unwrap_or(0) as i64,
@@ -77,7 +79,7 @@ impl IntervalValue {
                     &invalid
                 ))),
             },
-            Month => match &self.last_field {
+            Some(Month) => match &self.last_field {
                 Some(Month) | None => self
                     .parsed
                     .month
@@ -88,7 +90,7 @@ impl IntervalValue {
                     &invalid
                 ))),
             },
-            durationlike_field => {
+            Some(durationlike_field) => {
                 let mut seconds = 0u64;
                 match self.units_of(&durationlike_field) {
                     Some(time) => seconds += time * seconds_multiplier(&durationlike_field),
@@ -121,6 +123,10 @@ impl IntervalValue {
                     duration,
                 })
             }
+            None => Err(ValueError(format!(
+                "FIX ME: None catch in None => Err(ValueError(format!( {}",
+                self.value
+            ))),
         }
     }
 

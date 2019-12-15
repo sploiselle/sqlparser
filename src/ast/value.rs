@@ -93,7 +93,8 @@ impl fmt::Display for Value {
             Value::Interval(IntervalValue {
                 parsed: _,
                 value,
-                leading_field: DateTimeField::Second,
+                leading_field_ymd: None,
+                leading_field_hms: Some(DateTimeField::Second),
                 leading_precision: Some(leading_precision),
                 last_field,
                 fractional_seconds_precision: Some(fractional_seconds_precision),
@@ -112,17 +113,28 @@ impl fmt::Display for Value {
             Value::Interval(IntervalValue {
                 parsed: _,
                 value,
-                leading_field,
+                leading_field_ymd,
+                leading_field_hms,
                 leading_precision,
                 last_field,
                 fractional_seconds_precision,
             }) => {
-                write!(
-                    f,
-                    "INTERVAL '{}' {}",
-                    escape_single_quote_string(value),
-                    leading_field
-                )?;
+                // SEAN: How to return error here?
+                if let Some(leading_field) = leading_field_ymd {
+                    write!(
+                        f,
+                        "INTERVAL '{}' {}",
+                        escape_single_quote_string(value),
+                        leading_field
+                    )?;
+                } else if let Some(leading_field) = leading_field_hms {
+                    write!(
+                        f,
+                        "INTERVAL '{}' {}",
+                        escape_single_quote_string(value),
+                        leading_field
+                    )?;
+                }
                 if let Some(leading_precision) = leading_precision {
                     write!(f, " ({})", leading_precision)?;
                 }
