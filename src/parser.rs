@@ -519,7 +519,7 @@ impl Parser {
         use std::convert::TryInto;
 
         let value = self.parse_literal_string()?;
-        let pdt = Self::parse_interval_string(
+        let pdt = Self::parse_interval_string_from_shorthand(
             &value,
             &Some(DateTimeField::Year),
             &Some(DateTimeField::Day),
@@ -700,162 +700,63 @@ impl Parser {
         // the duration of the interval.
         let mut raw_value = self.parse_literal_string()?;
 
-        let (leading_field_ym, leading_field_dhms) = if self.contains_date_time_str(&raw_value)? {
-            // SEAN: NEED TO DETERMINE WHERE NEGATIVE IS USED
-            // Hack to allow INTERVAL types like:
-            // INTERVAL '-30 day'
-            let lc = raw_value.to_lowercase();
-            let split = lc.split(' ').collect::<Vec<&str>>();
-            if split.len() % 2 == 0 {
-                struct TempInterval {
-                    year: i32,
-                    month: i32,
-                    day: i32,
-                    hour: i32,
-                    minute: i32,
-                    second: i32,
+        let (value, leading_field_ym, leading_field_dhms) =
+            if self.contains_date_time_str(&raw_value)? {
+                let value = Self::parse_interval_string_from_datetime_str(&raw_value);
+
+                match value {
+                    Ok(v) => {
+                        let leading_field_ym;
+                        let leading_field_dhms;
+
+                        if v.year != Some(0) {
+                            leading_field_ym = Some(DateTimeField::Year);
+                        } else if v.month != Some(0) {
+                            leading_field_ym = Some(DateTimeField::Month);
+                        } else {
+                            leading_field_ym = None;
+                        }
+
+                        if v.day != Some(0) {
+                            leading_field_dhms = Some(DateTimeField::Day);
+                        } else if v.hour != Some(0) {
+                            leading_field_dhms = Some(DateTimeField::Hour);
+                        } else if v.minute != Some(0) {
+                            leading_field_dhms = Some(DateTimeField::Minute);
+                        } else if v.second != Some(0) {
+                            leading_field_dhms = Some(DateTimeField::Second);
+                        } else {
+                            leading_field_ym = None;
+                        }
+
+                        (v, leading_field_ym, leading_field_dhms)
+                    }
+                    Err(v) => return Err(v),
                 }
-
-                let mut ti = TempInterval {
-                    year: 0,
-                    month: 0,
-                    day: 0,
-                    hour: 0,
-                    minute: 0,
-                    second: 0,
-                };
-
-                let track_seen_field = |field_track: &mut i32, field_max: &mut i32, val: i32| {
-                    if *field_track <= val {
-                        return parser_err!("Invalid INTERVAL: {:#?}", raw_value);
-                    } else {
-                        *field_track = val;
-                        *field_max = cmp::max(val, *field_max);
-                        Ok(())
-                    }
-                };
-
-                let mut ym_max = 0;
-                let mut dhms_max = 0;
-                let mut ym_track = i32::max_value();
-                let mut dhms_track = i32::max_value();
-
-                for i in 0..split.len() / 2 {
-                    let v = match split[i * 2].parse::<i32>() {
-                        Ok(v) => v,
-                        Err(_) => return parser_err!("Invalid INTERVAL: {:#?}", raw_value),
-                    };
-
-                    match split[i * 2 + 1] {
-                        "year" | "years" => {
-                            track_seen_field(&mut ym_track, &mut ym_max, 2)?;
-                            ti.year = v;
-                        }
-                        "month" | "months" => {
-                            track_seen_field(&mut ym_track, &mut ym_max, 1)?;
-                            ti.month = v;
-                        }
-                        "day" | "days" => {
-                            track_seen_field(&mut dhms_track, &mut dhms_max, 8)?;
-                            ti.day = v;
-                        }
-                        "hour" | "hours" => {
-                            track_seen_field(&mut dhms_track, &mut dhms_max, 4)?;
-                            ti.hour = v;
-                        }
-                        "minute" | "minutes" => {
-                            track_seen_field(&mut dhms_track, &mut dhms_max, 2)?;
-                            ti.minute = v;
-                        }
-                        "second" | "seconds" => {
-                            track_seen_field(&mut dhms_track, &mut dhms_max, 1)?;
-                            ti.second = v;
-                        }
-                        _ => {
-                            return parser_err!("Invalid INTERVAL: {:#?}", raw_value);
-                        }
-                    }
-                }
-
-                raw_value = "".to_string();
-
-                let ym_lead = if ym_max < 3 {
-                    if ti.year < 0 || ti.month < 0 {
-                        raw_value = format!("{}-", raw_value);
-                        ti.year = ti.year.abs();
-                        ti.month = ti.month.abs();
-                    }
-                    raw_value = format!("{}{}-{} ", raw_value, ti.year, ti.month);
-                    Some(DateTimeField::Year)
-                } else {
-                    None
-                };
-
-                println!("dhms_max {}", dhms_max);
-
-                let dhms_lead = match dhms_max {
-                    8 => {
-                        if ti.day < 0 {
-                            raw_value = format!("{}-", raw_value);
-                            ti.day = ti.day.abs();
-                        }
-                        raw_value = format!(
-                            "{}{} {}:{}:{}",
-                            raw_value, ti.day, ti.hour, ti.minute, ti.second
-                        );
-                        Some(DateTimeField::Day)
-                    }
-                    4 => {
-                        if ti.hour < 0 {
-                            raw_value = format!("{}-", raw_value);
-                            ti.hour = ti.hour.abs();
-                        }
-                        raw_value = format!("{}{}:{}:{}", raw_value, ti.hour, ti.minute, ti.second);
-                        Some(DateTimeField::Hour)
-                    }
-                    2 => {
-                        if ti.minute < 0 {
-                            raw_value = format!("{}-", raw_value);
-                            ti.minute = ti.minute.abs();
-                        }
-                        raw_value = format!("{}{}:{}", raw_value, ti.minute, ti.second);
-                        Some(DateTimeField::Minute)
-                    }
-                    1 => {
-                        if ti.second < 0 {
-                            raw_value = format!("{}-", raw_value);
-                            ti.second = ti.second.abs();
-                        }
-                        raw_value = format!("{}{}", raw_value, ti.second);
-                        Some(DateTimeField::Second)
-                    }
-                    _ => None,
-                };
-
-                println!("raw_value {}", raw_value);
-
-                // Convert datetime string format to interval string format.
-
-                (ym_lead, dhms_lead)
             } else {
-                return parser_err!("Invalid INTERVAL: {:#?}", raw_value);
-            }
-        } else {
-            match self.expect_one_of_keywords(&[
-                "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS", "DAYS",
-                "HOURS", "MINUTES", "SECONDS",
-            ]) {
-                Ok(d) => match self.parse_date_time_field_given_str(&d.to_uppercase())? {
-                    DateTimeField::Year => (Some(DateTimeField::Year), None),
-                    DateTimeField::Month => (Some(DateTimeField::Month), None),
-                    DateTimeField::Day => (None, Some(DateTimeField::Day)),
-                    DateTimeField::Hour => (None, Some(DateTimeField::Hour)),
-                    DateTimeField::Minute => (None, Some(DateTimeField::Minute)),
-                    DateTimeField::Second => (None, Some(DateTimeField::Second)),
-                },
-                Err(_) => self.infer_lead_from_interval_str(raw_value.clone())?,
-            }
-        };
+                let (leading_field_ym, leading_field_dhms) = match self.expect_one_of_keywords(&[
+                    "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS", "DAYS",
+                    "HOURS", "MINUTES", "SECONDS",
+                ]) {
+                    Ok(d) => match self.parse_date_time_field_given_str(&d.to_uppercase())? {
+                        DateTimeField::Year => (Some(DateTimeField::Year), None),
+                        DateTimeField::Month => (Some(DateTimeField::Month), None),
+                        DateTimeField::Day => (None, Some(DateTimeField::Day)),
+                        DateTimeField::Hour => (None, Some(DateTimeField::Hour)),
+                        DateTimeField::Minute => (None, Some(DateTimeField::Minute)),
+                        DateTimeField::Second => (None, Some(DateTimeField::Second)),
+                    },
+                    Err(_) => self.infer_lead_from_interval_str(raw_value.clone())?,
+                };
+
+                let value = Self::parse_interval_string_from_shorthand(
+                    &raw_value,
+                    &leading_field_ym,
+                    &leading_field_dhms,
+                )?;
+
+                (value, leading_field_ym, leading_field_dhms)
+            };
 
         let (leading_precision, precision_ym, precision_dhms, fsec_precision) =
             if leading_field_dhms == Some(DateTimeField::Second) && leading_field_ym == None {
@@ -898,9 +799,6 @@ impl Parser {
         } else {
             println!("precision_dhms None");
         }
-
-        let value =
-            Self::parse_interval_string(&raw_value, &leading_field_ym, &leading_field_dhms)?;
 
         Ok(Expr::Value(Value::Interval(IntervalValue {
             value: raw_value,
@@ -1158,7 +1056,7 @@ impl Parser {
     ///   | <minutes value> [ <colon> <seconds value> ]
     ///   | <seconds value>
     /// ```
-    pub fn parse_interval_string(
+    pub fn parse_interval_string_from_shorthand(
         value: &str,
         leading_field_ym: &Option<DateTimeField>,
         leading_field_dhms: &Option<DateTimeField>,
@@ -1169,7 +1067,22 @@ impl Parser {
             ));
         }
         let toks = datetime::tokenize_interval(value)?;
-        datetime::build_parsed_datetime(&toks, leading_field_ym, leading_field_dhms, value)
+        datetime::build_parsed_datetime_from_shorthand(
+            &toks,
+            leading_field_ym,
+            leading_field_dhms,
+            value,
+        )
+    }
+    pub fn parse_interval_string_from_datetime_str(
+        value: &str,
+    ) -> Result<ParsedDateTime, ParserError> {
+        if value.is_empty() {
+            return Err(ParserError::ParserError(
+                "Interval date string is empty!".to_string(),
+            ));
+        }
+        datetime::build_parsed_datetime_from_datetime_str(value)
     }
 
     pub fn parse_timestamp_string(
@@ -1184,7 +1097,7 @@ impl Parser {
 
         let (ts_string, tz_string) = datetime::split_timestamp_string(value);
 
-        let mut pdt = Self::parse_interval_string(
+        let mut pdt = Self::parse_interval_string_from_shorthand(
             ts_string,
             &Some(DateTimeField::Year),
             &Some(DateTimeField::Hour),
@@ -1193,7 +1106,8 @@ impl Parser {
             return Ok(pdt);
         }
 
-        pdt.timezone_offset_second = Some(datetime::parse_timezone_offset_second(tz_string)?);
+        pdt.timezone_offset_second =
+            Some(datetime::parse_timezone_offset_second(tz_string)? as i128);
         Ok(pdt)
     }
 

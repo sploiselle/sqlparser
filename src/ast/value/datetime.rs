@@ -156,7 +156,7 @@ impl IntervalValue {
     }
 
     /// Retrieve the number that we parsed out of the literal string for the `field`
-    fn units_of(&self, field: &DateTimeField) -> Option<u64> {
+    fn units_of(&self, field: &DateTimeField) -> Option<i128> {
         match field {
             DateTimeField::Year => self.parsed.year,
             DateTimeField::Month => self.parsed.month,
@@ -321,14 +321,14 @@ pub struct ParsedTimestamp {
 pub struct ParsedDateTime {
     pub is_positive_mon: bool,
     pub is_positive_dur: bool,
-    pub year: Option<u64>,
-    pub month: Option<u64>,
-    pub day: Option<u64>,
-    pub hour: Option<u64>,
-    pub minute: Option<u64>,
-    pub second: Option<u64>,
-    pub nano: Option<u32>,
-    pub timezone_offset_second: Option<i64>,
+    pub year: Option<i128>,
+    pub month: Option<i128>,
+    pub day: Option<i128>,
+    pub hour: Option<i128>,
+    pub minute: Option<i128>,
+    pub second: Option<i128>,
+    pub nano: Option<i64>,
+    pub timezone_offset_second: Option<i128>,
 }
 
 impl ParsedDateTime {
