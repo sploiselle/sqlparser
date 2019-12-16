@@ -65,21 +65,15 @@ impl IntervalValue {
     pub fn computed_permissive(&self) -> Result<Interval, ValueError> {
         use DateTimeField::*;
 
-        match (self.parsed.month) {
-            (Some(mon)) => println!("pdt mon {} is pos? {}", mon, self.parsed.positivity_mon()),
-            (_) => {}
-        }
-
         let calc_months = match &self.leading_field_ym {
             Some(Year) => match &self.precision_ym {
-                Some(Month) | None => Ok(self.parsed.positivity_mon()
-                    * (self.parsed.year.unwrap_or(0) as i64 * 12
-                        + self.parsed.month.unwrap_or(0) as i64)),
+                Some(Month) | None => Ok(self.parsed.year.unwrap_or(0) as i64 * 12
+                    + self.parsed.month.unwrap_or(0) as i64),
                 Some(Year) => self
                     .parsed
                     .year
                     .ok_or_else(|| ValueError("No YEAR provided".into()))
-                    .map(|year| self.parsed.positivity_mon() * (year as i64) * 12),
+                    .map(|year| year as i64 * 12),
                 Some(invalid) => Err(ValueError(format!(
                     "Invalid specifier for YEAR precision: {}",
                     &invalid
@@ -90,7 +84,7 @@ impl IntervalValue {
                     .parsed
                     .month
                     .ok_or_else(|| ValueError("No MONTH provided".into()))
-                    .map(|m| self.parsed.positivity_mon() * (m as i64)),
+                    .map(|m| m as i64),
                 Some(invalid) => Err(ValueError(format!(
                     "Invalid specifier for MONTH precision: {}",
                     &invalid
@@ -101,15 +95,10 @@ impl IntervalValue {
 
         let calc_dur = match &self.leading_field_dhms {
             Some(durationlike_field) => {
-                let mut seconds = 0u64;
-                match self.units_of(&durationlike_field) {
-                    Some(time) => seconds += time * seconds_multiplier(&durationlike_field),
-                    None => {
-                        return Err(ValueError(format!(
-                            "No {} provided in value string for {}",
-                            durationlike_field, self.value
-                        )))
-                    }
+                let mut seconds = 0i128;
+
+                if let Some(time) = self.units_of(&durationlike_field) {
+                    seconds += time * seconds_multiplier(&durationlike_field);
                 }
 
                 // min_field is either an explicitly defined minimum field,
@@ -129,8 +118,8 @@ impl IntervalValue {
                     }
                 }
                 let duration = match (min_field, self.parsed.nano) {
-                    (DateTimeField::Second, Some(nanos)) => Duration::new(seconds, nanos),
-                    (_, _) => Duration::from_secs(seconds),
+                    (DateTimeField::Second, Some(nanos)) => Duration::new(seconds as u64, nanos),
+                    (_, _) => Duration::from_secs(seconds as u64),
                 };
 
                 println!("Total seconds {}", seconds);
@@ -160,105 +149,128 @@ impl IntervalValue {
         match field {
             DateTimeField::Year => self.parsed.year,
             DateTimeField::Month => self.parsed.month,
-            DateTimeField::Day => self.parsed.day,
-            DateTimeField::Hour => self.parsed.hour,
-            DateTimeField::Minute => self.parsed.minute,
-            DateTimeField::Second => self.parsed.second,
+            DateTimeField::Day => {
+                if let Some(d) = self.parsed.day {
+                    Some(d as i128)
+                } else {
+                    None
+                }
+            }
+            DateTimeField::Hour => {
+                if let Some(h) = self.parsed.hour {
+                    Some(h as i128)
+                } else {
+                    None
+                }
+            }
+            DateTimeField::Minute => {
+                if let Some(m) = self.parsed.minute {
+                    Some(m as i128)
+                } else {
+                    None
+                }
+            }
+            DateTimeField::Second => {
+                if let Some(s) = self.parsed.second {
+                    Some(s as i128)
+                } else {
+                    None
+                }
+            }
         }
     }
-
-    /// Verify that the fields in me make sense
-    ///
-    /// Returns Ok if the fields are fully specified, otherwise an error
-    ///
-    /// # Examples
-    ///
-    /// ```sql
-    /// INTERVAL '1 5' DAY TO HOUR -- Ok
-    /// INTERVAL '1 5' DAY         -- Err
-    /// INTERVAL '1:2:3' HOUR TO SECOND   -- Ok
-    /// INTERVAL '1:2:3' HOUR TO MINUTE   -- Err
-    /// INTERVAL '1:2:3' MINUTE TO SECOND -- Err
-    /// INTERVAL '1:2:3' DAY TO SECOND    -- Err
-    /// ```
-    // pub fn fields_match_precision(&self) -> Result<(), ValueError> {
-    //     let mut errors = vec![];
-    //     let last_field = self
-    //         .last_field
-    //         .as_ref()
-    //         .unwrap_or_else(|| &self.leading_field);
-    //     let mut extra_leading_fields = vec![];
-    //     let mut extra_trailing_fields = vec![];
-    //     // check for more data in the input string than was requested in <FIELD> TO <FIELD>
-    //     for field in std::iter::once(DateTimeField::Year).chain(DateTimeField::Year.into_iter()) {
-    //         if self.units_of(&field).is_none() {
-    //             continue;
-    //         }
-
-    //         if field < self.leading_field {
-    //             extra_leading_fields.push(field.clone());
-    //         }
-    //         if &field > last_field {
-    //             extra_trailing_fields.push(field.clone());
-    //         }
-    //     }
-
-    //     if !extra_leading_fields.is_empty() {
-    //         errors.push(format!(
-    //             "The interval string '{}' specifies {}s but the significance requested is {}",
-    //             self.value,
-    //             fields_msg(extra_leading_fields.into_iter()),
-    //             self.leading_field
-    //         ));
-    //     }
-    //     if !extra_trailing_fields.is_empty() {
-    //         errors.push(format!(
-    //             "The interval string '{}' specifies {}s but the requested precision would truncate to {}",
-    //             self.value, fields_msg(extra_trailing_fields.into_iter()), last_field
-    //         ));
-    //     }
-
-    //     // check for data requested by the <FIELD> TO <FIELD> that does not exist in the data
-    //     let missing_fields = match (
-    //         self.units_of(&self.leading_field),
-    //         self.units_of(&last_field),
-    //     ) {
-    //         (Some(_), Some(_)) => vec![],
-    //         (None, Some(_)) => vec![&self.leading_field],
-    //         (Some(_), None) => vec![last_field],
-    //         (None, None) => vec![&self.leading_field, last_field],
-    //     };
-
-    //     // if !missing_fields.is_empty() {
-    //     //     errors.push(format!(
-    //     //         "The interval string '{}' provides {} - which does not include the requested field(s) {}",
-    //     //         self.value, self.present_fields(), fields_msg(missing_fields.into_iter().cloned())));
-    //     // }
-
-    //     if !errors.is_empty() {
-    //         Err(ValueError(errors.join("; ")))
-    //     } else {
-    //         Ok(())
-    //     }
-    // }
-
-    fn present_fields(&self) -> String {
-        fields_msg(
-            std::iter::once(DateTimeField::Year)
-                .chain(DateTimeField::Year.into_iter())
-                .filter(|field| self.units_of(&field).is_some()),
-        )
-    }
 }
+/// Verify that the fields in me make sense
+///
+/// Returns Ok if the fields are fully specified, otherwise an error
+///
+/// # Examples
+///
+/// ```sql
+/// INTERVAL '1 5' DAY TO HOUR -- Ok
+/// INTERVAL '1 5' DAY         -- Err
+/// INTERVAL '1:2:3' HOUR TO SECOND   -- Ok
+/// INTERVAL '1:2:3' HOUR TO MINUTE   -- Err
+/// INTERVAL '1:2:3' MINUTE TO SECOND -- Err
+/// INTERVAL '1:2:3' DAY TO SECOND    -- Err
+/// ```
+// pub fn fields_match_precision(&self) -> Result<(), ValueError> {
+//     let mut errors = vec![];
+//     let last_field = self
+//         .last_field
+//         .as_ref()
+//         .unwrap_or_else(|| &self.leading_field);
+//     let mut extra_leading_fields = vec![];
+//     let mut extra_trailing_fields = vec![];
+//     // check for more data in the input string than was requested in <FIELD> TO <FIELD>
+//     for field in std::iter::once(DateTimeField::Year).chain(DateTimeField::Year.into_iter()) {
+//         if self.units_of(&field).is_none() {
+//             continue;
+//         }
 
-fn fields_msg(fields: impl Iterator<Item = DateTimeField>) -> String {
-    fields
-        .map(|field: DateTimeField| field.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+//         if field < self.leading_field {
+//             extra_leading_fields.push(field.clone());
+//         }
+//         if &field > last_field {
+//             extra_trailing_fields.push(field.clone());
+//         }
+//     }
 
-fn seconds_multiplier(field: &DateTimeField) -> u64 {
+//     if !extra_leading_fields.is_empty() {
+//         errors.push(format!(
+//             "The interval string '{}' specifies {}s but the significance requested is {}",
+//             self.value,
+//             fields_msg(extra_leading_fields.into_iter()),
+//             self.leading_field
+//         ));
+//     }
+//     if !extra_trailing_fields.is_empty() {
+//         errors.push(format!(
+//             "The interval string '{}' specifies {}s but the requested precision would truncate to {}",
+//             self.value, fields_msg(extra_trailing_fields.into_iter()), last_field
+//         ));
+//     }
+
+//     // check for data requested by the <FIELD> TO <FIELD> that does not exist in the data
+//     let missing_fields = match (
+//         self.units_of(&self.leading_field),
+//         self.units_of(&last_field),
+//     ) {
+//         (Some(_), Some(_)) => vec![],
+//         (None, Some(_)) => vec![&self.leading_field],
+//         (Some(_), None) => vec![last_field],
+//         (None, None) => vec![&self.leading_field, last_field],
+//     };
+
+//     // if !missing_fields.is_empty() {
+//     //     errors.push(format!(
+//     //         "The interval string '{}' provides {} - which does not include the requested field(s) {}",
+//     //         self.value, self.present_fields(), fields_msg(missing_fields.into_iter().cloned())));
+//     // }
+
+//     if !errors.is_empty() {
+//         Err(ValueError(errors.join("; ")))
+//     } else {
+//         Ok(())
+//     }
+// }
+
+// fn present_fields(&self) -> String {
+//     fields_msg(
+//         std::iter::once(DateTimeField::Year)
+//             .chain(DateTimeField::Year.into_iter())
+//             .filter(|field| self.units_of(&field).is_some()),
+//     )
+// }
+
+// fn fields_msg(fields: impl Iterator<Item = DateTimeField>) -> String {
+//     fields
+//         .map(|field: DateTimeField| field.to_string())
+//         .collect::<Vec<_>>()
+//         .join(", ")
+// }
+
+fn seconds_multiplier(field: &DateTimeField) -> i128 {
     match field {
         DateTimeField::Day => 60 * 60 * 24,
         DateTimeField::Hour => 60 * 60,
@@ -319,33 +331,20 @@ pub struct ParsedTimestamp {
 /// [`ParsedTimestamp`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParsedDateTime {
+    // is_amibiguous might have its value's change;
+    // you should not assume that the ParsedDateTime
+    // is "correct" until is_ambiguous is false.
+    pub is_ambiguous: bool,
     pub is_positive_mon: bool,
     pub is_positive_dur: bool,
     pub year: Option<i128>,
     pub month: Option<i128>,
-    pub day: Option<i128>,
-    pub hour: Option<i128>,
-    pub minute: Option<i128>,
-    pub second: Option<i128>,
-    pub nano: Option<i64>,
-    pub timezone_offset_second: Option<i128>,
-}
-
-impl ParsedDateTime {
-    /// `1` if is_positive, else `-1`
-    pub(crate) fn positivity_mon(&self) -> i64 {
-        match self.is_positive_mon {
-            true => 1,
-            false => -1,
-        }
-    }
-    /// `1` if is_positive, else `-1`
-    pub(crate) fn positivity_dur(&self) -> i64 {
-        match self.is_positive_dur {
-            true => 1,
-            false => -1,
-        }
-    }
+    pub day: Option<u64>,
+    pub hour: Option<u64>,
+    pub minute: Option<u64>,
+    pub second: Option<u64>,
+    pub nano: Option<u32>,
+    pub timezone_offset_second: Option<i64>,
 }
 
 impl Default for ParsedDateTime {

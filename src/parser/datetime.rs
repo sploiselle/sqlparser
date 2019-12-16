@@ -347,9 +347,11 @@ fn build_parsed_datetime_ym(
 ) -> Result<(), ParserError> {
     use IntervalToken::*;
 
+    let mut is_positive = true;
+
     if let Some(Dash) = actual.peek() {
         // If preceded by '-', assume negative.
-        pdt.is_positive_mon = false;
+        is_positive = false;
         actual.next();
     }
 
@@ -364,8 +366,8 @@ fn build_parsed_datetime_ym(
             (Num(val), Num(_)) => {
                 let val = *val;
                 match current_field {
-                    DateTimeField::Year => pdt.year = Some(val),
-                    DateTimeField::Month => pdt.month = Some(val),
+                    DateTimeField::Year => pdt.year = Some(val as i128),
+                    DateTimeField::Month => pdt.month = Some(val as i128),
                     _ => {
                         return parser_err!("Invalid field {} in ym {}", current_field, val);
                     }
@@ -391,10 +393,21 @@ fn build_parsed_datetime_ym(
             }
         }
     }
+
     if let Some(Space) = actual.peek() {
         // Consume trailig space after Month, which is permissible.
         actual.next();
     }
+
+    if !is_positive {
+        if let Some(y) = pdt.year {
+            pdt.year = Some(y * -1);
+        }
+        if let Some(m) = pdt.month {
+            pdt.month = Some(m * -1);
+        }
+    }
+
     Ok(())
 }
 
@@ -491,9 +504,7 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
     // Hack to allow INTERVAL types like:
     // INTERVAL '-30 day'
 
-    let mut pdt = ParsedDateTime {
-        ..Default::default()
-    };
+    let mut pdt = ParsedDateTime::default();
     let lc = value.to_lowercase();
     let split = lc.split(' ').collect::<Vec<&str>>();
     if split.len() % 2 == 0 {
@@ -513,7 +524,7 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
         let mut dhms_track = i32::max_value();
 
         for i in 0..split.len() / 2 {
-            let v = match split[i * 2].parse::<i128>() {
+            let mut v = match split[i * 2].parse::<i128>() {
                 Ok(v) => v,
                 Err(_) => return parser_err!("Invalid INTERVAL: {:#?}", value),
             };
@@ -529,87 +540,41 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
                 }
                 "day" | "days" => {
                     track_seen_field(&mut dhms_track, &mut dhms_max, 8)?;
-                    pdt.day = Some(v);
+                    if v < 0 {
+                        pdt.is_positive_dur = false;
+                        v = v.abs()
+                    }
+                    pdt.day = Some(v as u64);
                 }
                 "hour" | "hours" => {
                     track_seen_field(&mut dhms_track, &mut dhms_max, 4)?;
-                    pdt.hour = Some(v);
+                    if v < 0 {
+                        pdt.is_positive_dur = false;
+                        v = v.abs()
+                    }
+                    pdt.hour = Some(v as u64);
                 }
                 "minute" | "minutes" => {
                     track_seen_field(&mut dhms_track, &mut dhms_max, 2)?;
-                    pdt.minute = Some(v);
+                    if v < 0 {
+                        pdt.is_positive_dur = false;
+                        v = v.abs()
+                    }
+                    pdt.minute = Some(v as u64);
                 }
                 "second" | "seconds" => {
                     track_seen_field(&mut dhms_track, &mut dhms_max, 1)?;
-                    pdt.second = Some(v);
+                    if v < 0 {
+                        pdt.is_positive_dur = false;
+                        v = v.abs()
+                    }
+                    pdt.second = Some(v as u64);
                 }
                 _ => {
                     return parser_err!("Invalid INTERVAL: {:#?}", value);
                 }
             }
         }
-
-        // let raw_value = "".to_string();
-
-        // let ym_lead = if ym_max < 3 {
-        //     if ti.year < 0 || ti.month < 0 {
-        //         raw_value = format!("{}-", raw_value);
-        //         ti.year = ti.year.abs();
-        //         ti.month = ti.month.abs();
-        //     }
-        //     raw_value = format!("{}{}-{} ", raw_value, ti.year, ti.month);
-        //     Some(DateTimeField::Year)
-        // } else {
-        //     None
-        // };
-
-        // println!("dhms_max {}", dhms_max);
-
-        // let dhms_lead = match dhms_max {
-        //     8 => {
-        //         if ti.day < 0 {
-        //             raw_value = format!("{}-", raw_value);
-        //             ti.day = ti.day.abs();
-        //         }
-        //         raw_value = format!(
-        //             "{}{} {}:{}:{}",
-        //             raw_value, ti.day, ti.hour, ti.minute, ti.second
-        //         );
-        //         Some(DateTimeField::Day)
-        //     }
-        //     4 => {
-        //         if ti.hour < 0 {
-        //             raw_value = format!("{}-", raw_value);
-        //             ti.hour = ti.hour.abs();
-        //         }
-        //         raw_value = format!("{}{}:{}:{}", raw_value, ti.hour, ti.minute, ti.second);
-        //         Some(DateTimeField::Hour)
-        //     }
-        //     2 => {
-        //         if ti.minute < 0 {
-        //             raw_value = format!("{}-", raw_value);
-        //             ti.minute = ti.minute.abs();
-        //         }
-        //         raw_value = format!("{}{}:{}", raw_value, ti.minute, ti.second);
-        //         Some(DateTimeField::Minute)
-        //     }
-        //     1 => {
-        //         if ti.second < 0 {
-        //             raw_value = format!("{}-", raw_value);
-        //             ti.second = ti.second.abs();
-        //         }
-        //         raw_value = format!("{}{}", raw_value, ti.second);
-        //         Some(DateTimeField::Second)
-        //     }
-        //     _ => None,
-        // };
-
-        // println!("raw_value {}", raw_value);
-
-        // // Convert datetime string format to interval string format.
-
-        // (ym_lead, dhms_lead)
-
         Ok(pdt)
     } else {
         return parser_err!("Invalid INTERVAL: {:#?}", value);
@@ -675,26 +640,12 @@ mod test {
         use DateTimeField::*;
         use IntervalToken::*;
         assert_eq!(
-            potential_interval_tokens(&Year),
-            vec![
-                Num(0),
-                Dash,
-                Num(0),
-                Dash,
-                Num(0),
-                Space,
-                Num(0),
-                Colon,
-                Num(0),
-                Colon,
-                Num(0),
-                Dot,
-                Nanos(0),
-            ]
+            potential_interval_tokens_ym(&Year).unwrap(),
+            vec![Num(0), Dash, Num(0)]
         );
 
         assert_eq!(
-            potential_interval_tokens(&Day),
+            potential_interval_tokens_dhms(&Day).unwrap(),
             vec![
                 Num(0),
                 Space,
