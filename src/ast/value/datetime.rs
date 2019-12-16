@@ -11,9 +11,9 @@ pub struct IntervalValue {
     pub parsed: ParsedDateTime,
     /// The unit of the first field in the interval. `INTERVAL 'T' MINUTE`
     /// means `T` is in minutes
-    pub leading_field_ymd: Option<DateTimeField>,
+    pub leading_field_ym: Option<DateTimeField>,
 
-    pub leading_field_hms: Option<DateTimeField>,
+    pub leading_field_dhms: Option<DateTimeField>,
     /// How many digits the leading field is allowed to occupy.
     ///
     /// The interval `INTERVAL '1234' MINUTE(3)` is **illegal**, but `INTERVAL
@@ -37,7 +37,8 @@ pub struct IntervalValue {
     ///   seconds.
     /// * In `INTERVAL '1:1:1' HOURS TO MINUTES` the interval should be
     ///   equivalent to `3660` seconds.
-    pub last_field: Option<DateTimeField>,
+    pub precision_ym: Option<DateTimeField>,
+    pub precision_dhms: Option<DateTimeField>,
     /// The seconds precision can be specified in SQL source as
     /// `INTERVAL '__' SECOND(_, x)` (in which case the `leading_field`
     /// will be `Second` and the `last_field` will be `None`),
@@ -63,72 +64,94 @@ impl IntervalValue {
     /// LAST` field is larger than the `LEAD`.
     pub fn computed_permissive(&self) -> Result<Interval, ValueError> {
         use DateTimeField::*;
-        match &self.leading_field_ymd {
-            Some(Year) => match &self.last_field {
-                Some(Month) => Ok(Interval::Months(
-                    self.parsed.positivity() * self.parsed.year.unwrap_or(0) as i64 * 12
-                        + self.parsed.month.unwrap_or(0) as i64,
-                )),
-                Some(Year) | None => self
+
+        match (self.parsed.month) {
+            (Some(mon)) => println!("pdt mon {} is pos? {}", mon, self.parsed.positivity_mon()),
+            (_) => {}
+        }
+
+        let calc_months = match &self.leading_field_ym {
+            Some(Year) => match &self.precision_ym {
+                Some(Month) | None => Ok(self.parsed.positivity_mon()
+                    * (self.parsed.year.unwrap_or(0) as i64 * 12
+                        + self.parsed.month.unwrap_or(0) as i64)),
+                Some(Year) => self
                     .parsed
                     .year
                     .ok_or_else(|| ValueError("No YEAR provided".into()))
-                    .map(|year| Interval::Months(self.parsed.positivity() * year as i64 * 12)),
+                    .map(|year| self.parsed.positivity_mon() * (year as i64) * 12),
                 Some(invalid) => Err(ValueError(format!(
                     "Invalid specifier for YEAR precision: {}",
                     &invalid
                 ))),
             },
-            Some(Month) => match &self.last_field {
+            Some(Month) => match &self.precision_ym {
                 Some(Month) | None => self
                     .parsed
                     .month
                     .ok_or_else(|| ValueError("No MONTH provided".into()))
-                    .map(|m| Interval::Months(self.parsed.positivity() * m as i64)),
+                    .map(|m| self.parsed.positivity_mon() * (m as i64)),
                 Some(invalid) => Err(ValueError(format!(
                     "Invalid specifier for MONTH precision: {}",
                     &invalid
                 ))),
             },
-            None => match &self.leading_field_hms {
-                Some(durationlike_field) => {
-                    let mut seconds = 0u64;
-                    match self.units_of(&durationlike_field) {
-                        Some(time) => seconds += time * seconds_multiplier(&durationlike_field),
-                        None => {
-                            return Err(ValueError(format!(
-                                "No {} provided in value string for {}",
-                                durationlike_field, self.value
-                            )))
-                        }
+            _ => Ok(0),
+        };
+
+        let calc_dur = match &self.leading_field_dhms {
+            Some(durationlike_field) => {
+                let mut seconds = 0u64;
+                match self.units_of(&durationlike_field) {
+                    Some(time) => seconds += time * seconds_multiplier(&durationlike_field),
+                    None => {
+                        return Err(ValueError(format!(
+                            "No {} provided in value string for {}",
+                            durationlike_field, self.value
+                        )))
                     }
-                    let min_field = &self
-                        .last_field
-                        .clone()
-                        .unwrap_or_else(|| durationlike_field.clone());
-                    for field in durationlike_field
-                        .clone()
-                        .into_iter()
-                        .take_while(|f| f <= min_field)
-                    {
-                        if let Some(time) = self.units_of(&field) {
-                            seconds += time * seconds_multiplier(&field);
-                        }
-                    }
-                    let duration = match (min_field, self.parsed.nano) {
-                        (DateTimeField::Second, Some(nanos)) => Duration::new(seconds, nanos),
-                        (_, _) => Duration::from_secs(seconds),
-                    };
-                    Ok(Interval::Duration {
-                        is_positive: self.parsed.is_positive,
-                        duration,
-                    })
                 }
-                None => Err(ValueError(format!(
-                    "No appropriate field for {}",
-                    self.value
-                ))),
-            },
+
+                // min_field is either an explicitly defined minimum field,
+                // or converts None to the finest degree of granularity (seconds)
+                let min_field = &self
+                    .precision_dhms
+                    .clone()
+                    .unwrap_or_else(|| DateTimeField::Second);
+                print!("min_field {}", min_field);
+                for field in durationlike_field
+                    .clone()
+                    .into_iter()
+                    .take_while(|f| f <= min_field)
+                {
+                    if let Some(time) = self.units_of(&field) {
+                        seconds += time * seconds_multiplier(&field);
+                    }
+                }
+                let duration = match (min_field, self.parsed.nano) {
+                    (DateTimeField::Second, Some(nanos)) => Duration::new(seconds, nanos),
+                    (_, _) => Duration::from_secs(seconds),
+                };
+
+                println!("Total seconds {}", seconds);
+                Ok((duration, self.parsed.is_positive_dur))
+            }
+            None => Ok((Duration::new(0, 0), true)),
+        };
+
+        match (calc_months, calc_dur) {
+            (Ok(cm), Ok(cd)) => {
+                let c_dur = cd.0;
+                let c_pos = cd.1;
+
+                Ok(Interval {
+                    months: cm,
+                    duration: c_dur,
+                    is_positive: c_pos,
+                })
+            }
+            (Err(v), _) => Err(v),
+            (_, Err(v)) => Err(v),
         }
     }
 
@@ -254,14 +277,12 @@ fn seconds_multiplier(field: &DateTimeField) -> u64 {
 /// Intervals of unit [`DateTimeField::Day`] or smaller are semantically a
 /// multiple of seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Interval {
+pub struct Interval {
     /// A possibly negative number of months for field types like `YEAR`
-    Months(i64),
+    pub months: i64,
     /// An actual timespan, possibly negative, because why not
-    Duration {
-        is_positive: bool,
-        duration: Duration,
-    },
+    pub duration: Duration,
+    pub is_positive: bool,
 }
 
 /// The fields of a Date
@@ -298,7 +319,8 @@ pub struct ParsedTimestamp {
 /// [`ParsedTimestamp`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParsedDateTime {
-    pub is_positive: bool,
+    pub is_positive_mon: bool,
+    pub is_positive_dur: bool,
     pub year: Option<u64>,
     pub month: Option<u64>,
     pub day: Option<u64>,
@@ -311,8 +333,15 @@ pub struct ParsedDateTime {
 
 impl ParsedDateTime {
     /// `1` if is_positive, else `-1`
-    pub(crate) fn positivity(&self) -> i64 {
-        match self.is_positive {
+    pub(crate) fn positivity_mon(&self) -> i64 {
+        match self.is_positive_mon {
+            true => 1,
+            false => -1,
+        }
+    }
+    /// `1` if is_positive, else `-1`
+    pub(crate) fn positivity_dur(&self) -> i64 {
+        match self.is_positive_dur {
             true => 1,
             false => -1,
         }
@@ -322,7 +351,8 @@ impl ParsedDateTime {
 impl Default for ParsedDateTime {
     fn default() -> ParsedDateTime {
         ParsedDateTime {
-            is_positive: true,
+            is_positive_mon: true,
+            is_positive_dur: true,
             year: None,
             month: None,
             day: None,

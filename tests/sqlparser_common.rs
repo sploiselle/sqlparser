@@ -1519,8 +1519,8 @@ fn parse_literal_interval_monthlike() {
     iv.value = "1-1".into();
     iv.parsed.year = Some(1);
     iv.parsed.month = Some(1);
-    iv.leading_field = DateTimeField::Year;
-    iv.last_field = Some(DateTimeField::Month);
+    iv.leading_field_ym = Some(DateTimeField::Year);
+    iv.precision_ym = Some(DateTimeField::Month);
     verify_interval(
         "SELECT INTERVAL '1-1' YEAR TO MONTH",
         iv,
@@ -1631,9 +1631,9 @@ fn parse_literal_interval_with_character_precision() {
                 nano: Some(10_000_000),
                 ..dflt()
             },
-            leading_field: DateTimeField::Minute,
+            leading_field_dhms: DateTimeField::Minute,
             leading_precision: Some(5),
-            last_field: Some(DateTimeField::Second),
+            precision_dhms: Some(DateTimeField::Second),
             fractional_seconds_precision: Some(5),
         },
         Interval::Duration {
@@ -1641,7 +1641,7 @@ fn parse_literal_interval_with_character_precision() {
             duration: Duration::new(61, 10_000_000),
         },
         Some("61.01s"),
-        None,
+        // None,
     );
 
     verify_interval(
