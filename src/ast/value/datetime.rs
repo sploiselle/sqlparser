@@ -69,22 +69,14 @@ impl IntervalValue {
             Some(Year) => match &self.precision_ym {
                 Some(Month) | None => Ok(self.parsed.year.unwrap_or(0) as i64 * 12
                     + self.parsed.month.unwrap_or(0) as i64),
-                Some(Year) => self
-                    .parsed
-                    .year
-                    .ok_or_else(|| ValueError("No YEAR provided".into()))
-                    .map(|year| year as i64 * 12),
+                Some(Year) => Ok(self.parsed.year.unwrap_or(0) as i64 * 12),
                 Some(invalid) => Err(ValueError(format!(
                     "Invalid specifier for YEAR precision: {}",
                     &invalid
                 ))),
             },
             Some(Month) => match &self.precision_ym {
-                Some(Month) | None => self
-                    .parsed
-                    .month
-                    .ok_or_else(|| ValueError("No MONTH provided".into()))
-                    .map(|m| m as i64),
+                Some(Month) | None => Ok(self.parsed.month.unwrap_or(0) as i64),
                 Some(invalid) => Err(ValueError(format!(
                     "Invalid specifier for MONTH precision: {}",
                     &invalid
@@ -350,6 +342,7 @@ pub struct ParsedDateTime {
 impl Default for ParsedDateTime {
     fn default() -> ParsedDateTime {
         ParsedDateTime {
+            is_ambiguous: false,
             is_positive_mon: true,
             is_positive_dur: true,
             year: None,
