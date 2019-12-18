@@ -364,7 +364,7 @@ impl fmt::Display for ParsedDateTime {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub enum DateTimeField {
     Year,
     Month,

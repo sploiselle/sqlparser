@@ -16,33 +16,58 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
         })?))
     };
 
-    let tokenize_buffers = |i: usize| -> Result<(), ParserError> {
-        if !num_buf.is_empty() {
-            toks.push(parse_num(&num_buf, i)?);
-            num_buf.clear();
-        } else if !char_buf.is_empty() {
-            toks.push(IntervalToken::TimeUnit(char_buf.clone()));
-            char_buf.clear();
-        }
-        Ok(())
-    };
+    // let tokenize_buffers = |i: usize| -> Result<(), ParserError> {
+    //     if !num_buf.is_empty() {
+    //         toks.push(parse_num(&num_buf, i)?);
+    //         num_buf.clear();
+    //     } else if !char_buf.is_empty() {
+    //         toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+    //         char_buf.clear();
+    //     }
+    //     Ok(())
+    // };
+
     let mut last_field_is_frac = false;
     for (i, chr) in value.chars().enumerate() {
         match chr {
             '-' => {
-                tokenize_buffers(i);
+                if !num_buf.is_empty() {
+                    toks.push(parse_num(&num_buf, i)?);
+                    num_buf.clear();
+                } else if !char_buf.is_empty() {
+                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    char_buf.clear();
+                }
                 toks.push(IntervalToken::Dash);
             }
             ' ' => {
-                tokenize_buffers(i);
+                if !num_buf.is_empty() {
+                    toks.push(parse_num(&num_buf, i)?);
+                    num_buf.clear();
+                } else if !char_buf.is_empty() {
+                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    char_buf.clear();
+                }
                 toks.push(IntervalToken::Space);
             }
             ':' => {
-                tokenize_buffers(i);
+                if !num_buf.is_empty() {
+                    toks.push(parse_num(&num_buf, i)?);
+                    num_buf.clear();
+                } else if !char_buf.is_empty() {
+                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    char_buf.clear();
+                }
                 toks.push(IntervalToken::Colon);
             }
             '.' => {
-                tokenize_buffers(i);
+                if !num_buf.is_empty() {
+                    toks.push(parse_num(&num_buf, i)?);
+                    num_buf.clear();
+                } else if !char_buf.is_empty() {
+                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    char_buf.clear();
+                }
                 toks.push(IntervalToken::Dot);
                 last_field_is_frac = true;
             }
@@ -182,51 +207,191 @@ fn tokenize_timezone(value: &str) -> Result<Vec<IntervalToken>, ParserError> {
     Ok(toks)
 }
 
+// determine_interval_parse_heads determines the "head" value of `interval_str`, i.e. where we should
+// begin parsing using potential_interval_tokens_ym and potential_interval_tokens_dhms. It also tracks
+// cases where `interval_str` is ambiguous and can be "moved" by the range declaration, e.g.
+// `INTERVAL '1' MINUTE`.
+//
+// Why do we parse in this way?
+//
+// Interval shorthand uses the following format:
+// Y-M D H:M:S.NS
+//
+// However, Postgres does not treat interval strings as expressing any continuous range, e.g.
+// `INTERVAL '1-2 3` represents `1 year 2 mons 00:00:03`. To handle this, we treat interval strings
+// as having three components:
+// {Y-M }{D }{H:M:S.NS}
+//
+// Throughout interval parsing, these elements are referred to with a suffix of _ym for the former
+// and _dhms for the latter.
+pub(crate) fn determine_interval_parse_heads(
+    interval_str: &str,
+) -> Result<
+    (
+        Option<DateTimeField>,
+        Option<DateTimeField>,
+        Option<DateTimeField>,
+    ),
+    ParserError,
+> {
+    let lead_hms_determ = |s: &str| -> Result<Option<DateTimeField>, ParserError> {
+        let mut z = s.chars().peekable();
+
+        if trim_and_check_leading_sign_numbers(&mut z).is_err() {
+            return parser_err!(format!(
+                "invalid input syntax for type interval: {}",
+                interval_str
+            ));
+        }
+
+        match z.next() {
+            // {?:...}
+            Some(':') => {
+                while let Some('0'..='9') = z.peek() {
+                    z.next();
+                }
+                match z.peek() {
+                    // Implies {H:M...}
+                    Some(':') | None => Ok(Some(DateTimeField::Hour)),
+                    // Implies {M:S.NS}
+                    Some('.') => Ok(Some(DateTimeField::Minute)),
+                    _ => {
+                        return parser_err!(format!(
+                            "invalid input syntax for type interval: {}",
+                            interval_str
+                        ))
+                    }
+                }
+            }
+            // Implies {S(.NS)?}
+            Some('.') | None => Ok(Some(DateTimeField::Second)),
+            _ => {
+                return parser_err!(format!(
+                    "invalid input syntax for type interval: {}",
+                    interval_str
+                ))
+            }
+        }
+    };
+
+    let v = interval_str
+        .trim()
+        .split_whitespace()
+        .collect::<Vec<&str>>();
+
+    match v.len() {
+        // Implies {Y... }{D }{...}
+        3 => Ok((
+            Some(DateTimeField::Year),
+            Some(DateTimeField::Day),
+            lead_hms_determ(v[2])?,
+        )),
+        // Implies {?}{?}{...}
+        2 => {
+            let lead_ym;
+            let lead_d;
+            let mut z = v[0].chars().peekable();
+
+            if trim_and_check_leading_sign_numbers(&mut z).is_err() {
+                return parser_err!(format!(
+                    "invalid input syntax for type interval: {}",
+                    interval_str
+                ));
+            }
+
+            match z.next() {
+                // Implies {Y-... }{}{...}
+                Some('-') => {
+                    lead_ym = Some(DateTimeField::Year);
+                    lead_d = None;
+                }
+                // Implies {}{D }{...}
+                None => {
+                    lead_ym = None;
+                    lead_d = Some(DateTimeField::Day);
+                }
+                _ => {
+                    return parser_err!(format!(
+                        "invalid input syntax for type interval: {}",
+                        interval_str
+                    ));
+                }
+            }
+            Ok((lead_ym, lead_d, lead_hms_determ(v[1])?))
+        }
+        1 => {
+            let mut z = interval_str.chars().peekable();
+
+            if trim_and_check_leading_sign_numbers(&mut z).is_err() {
+                return parser_err!(format!(
+                    "invalid input syntax for type interval: {}",
+                    interval_str
+                ));
+            }
+
+            match z.next() {
+                // Implies {Y-...}{}{}
+                Some('-') => Ok((Some(DateTimeField::Year), None, None)),
+                // Implies {}{}{...}
+                Some(_) => Ok((None, None, lead_hms_determ(interval_str)?)),
+                // Implies {?}{?}{?}, ambiguous case.
+                None => Ok((None, None, None)),
+            }
+        }
+        _ => parser_err!(format!(
+            "invalid input syntax for type interval: {}",
+            interval_str
+        )),
+    }
+}
+
+// Trim values equivalent to the regex (-[0-9]+).
+// Returns an error if does not contain 1 number.
+fn trim_and_check_leading_sign_numbers(
+    z: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Result<(), ParserError> {
+    // PostgreSQL inexplicably trims all leading colons from interval sections.
+    while let Some(':') = z.peek() {
+        z.next();
+    }
+
+    // Consume leading negative sign from any field.
+    if let Some('-') = z.peek() {
+        z.next();
+    }
+    // Ensure first non-dash character is a number.
+    if let Some('0'..='9') = z.next() {
+    } else {
+        return parser_err!("Interval component does not begin with number");
+    }
+
+    // Consume all following numbers.
+    while let Some('0'..='9') = z.peek() {
+        z.next();
+    }
+
+    Ok(())
+}
+
 /// Get the tokens that you *might* end up parsing starting with a most significant unit
 ///
 /// For example, parsing `INTERVAL '9-5 4:3' MONTH` is *illegal*, but you
 /// should interpret that as `9 months 5 days 4 hours 3 minutes`. This function
 /// doesn't take any perspective on what things should be, it just teslls you
 /// what the user might have meant.
-fn potential_interval_tokens_ym(from: &DateTimeField) -> Result<Vec<IntervalToken>, ParserError> {
+fn potential_interval_tokens(from: DateTimeField) -> Vec<IntervalToken> {
     use DateTimeField::*;
     use IntervalToken::*;
+
+    println!("Getting tokens starting at {}", from);
 
     let all_toks = [
         Num(0), // year
         Dash,
         Num(0), // month
         Space,
-    ];
-    let offset = match from {
-        Year => 0,
-        Month => 2,
-        _ => {
-            return Err(ParserError::ParserError(format!(
-                "Error parsing ym tokens; invalid search key from {}",
-                from
-            )))
-        }
-    };
-
-    Ok(all_toks[offset..].to_vec())
-}
-
-fn potential_interval_tokens_d(from: &DateTimeField) -> Result<Vec<IntervalToken>, ParserError> {
-    use IntervalToken::*;
-
-    let all_toks = [
         Num(0), // day
         Space,
-    ];
-    Ok(all_toks.to_vec())
-}
-
-fn potential_interval_tokens_hms(from: &DateTimeField) -> Result<Vec<IntervalToken>, ParserError> {
-    use DateTimeField::*;
-    use IntervalToken::*;
-
-    let all_toks = [
         Num(0), // hour
         Colon,
         Num(0), // minute
@@ -235,18 +400,15 @@ fn potential_interval_tokens_hms(from: &DateTimeField) -> Result<Vec<IntervalTok
         Dot,
         Nanos(0), // Nanos
     ];
-    let offset = match from {
-        Hour => 0,
-        Minute => 2,
-        Second => 4,
-        _ => {
-            return Err(ParserError::ParserError(format!(
-                "Error parsing hms tokens; invalid search key from {}",
-                from
-            )))
-        }
+    let (start, end) = match from {
+        Year => (0, 4),
+        Month => (2, 4),
+        Day => (4, 6),
+        Hour => (6, 13),
+        Minute => (8, 13),
+        Second => (10, 13),
     };
-    Ok(all_toks[offset..].to_vec())
+    all_toks[start..end].to_vec()
 }
 
 fn build_timezone_offset_second(tokens: &[IntervalToken], value: &str) -> Result<i64, ParserError> {
@@ -362,15 +524,21 @@ pub(crate) enum IntervalToken {
     TimeUnit(String),
 }
 
-fn build_parsed_datetime_ym(
+fn build_parsed_datetime_component(
     actual: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
-    leading_field: &DateTimeField,
+    leading_field: DateTimeField,
     value: &str,
     pdt: &mut ParsedDateTime,
 ) -> Result<(), ParserError> {
+    use DateTimeField::*;
     use IntervalToken::*;
 
     let mut is_positive = true;
+
+    // PostgreSQL inexplicably trims all leading colons from interval parts.
+    while let Some(Colon) = actual.peek() {
+        actual.next();
+    }
 
     if let Some(Dash) = actual.peek() {
         // If preceded by '-', assume negative.
@@ -378,33 +546,50 @@ fn build_parsed_datetime_ym(
         actual.next();
     }
 
-    let expected = potential_interval_tokens_ym(&leading_field)?;
+    let expected = potential_interval_tokens(leading_field);
+    let mut seconds_seen = 0;
 
-    let mut current_field = leading_field.clone();
+    println!("Tokens left {}", actual.len());
+
+    let mut current_field = leading_field;
     for (i, (atok, etok)) in actual.zip(&expected).enumerate() {
+        println!("In build_parsed_datetime_component pdt: {}", pdt);
         match (atok, etok) {
-            (Dash, Dash) | (Space, Space) | (Colon, Colon) | (Dot, Dot) => {
+            (Dash, Dash) | (Colon, Colon) | (Dot, Dot) => {
                 /* matching punctuation */
+                println!("Matching punctuation");
             }
             (Num(val), Num(_)) => {
+                println!("Matching numbers");
                 let val = *val;
                 match current_field {
                     DateTimeField::Year => pdt.year = Some(val as i128),
                     DateTimeField::Month => pdt.month = Some(val as i128),
+                    DateTimeField::Day => pdt.day = Some(val),
+                    DateTimeField::Hour => pdt.hour = Some(val),
+                    DateTimeField::Minute => pdt.minute = Some(val),
+                    DateTimeField::Second if seconds_seen == 0 => {
+                        println!("Seeing a second...");
+                        seconds_seen += 1;
+                        pdt.second = Some(val);
+                    }
                     _ => {
                         return parser_err!("Invalid field {} in ym {}", current_field, val);
                     }
                 }
-                if current_field != DateTimeField::Month {
+                if current_field != DateTimeField::Second {
                     current_field = current_field
                         .into_iter()
                         .next()
                         .expect("Exhausted day iterator");
                 }
             }
-            // Allow exiting the loop early if encountering a space.
-            // This more closely mirrors Postgres' interval parsing.
-            (Space, Num(_)) => return Ok(()),
+            (Nanos(val), Nanos(_)) if seconds_seen == 1 => pdt.nano = Some(*val),
+            // Break out of this component if you encounter a space.
+            (Space, _) => {
+                println!("Exit early");
+                return Ok(());
+            }
             (provided, expected) => {
                 return parser_err!(
                     "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
@@ -415,83 +600,33 @@ fn build_parsed_datetime_ym(
                 )
             }
         }
-    }
-
-    if let Some(Space) = actual.peek() {
-        // Consume trailig space after Month, which is permissible.
-        actual.next();
     }
 
     if !is_positive {
-        if let Some(y) = pdt.year {
-            pdt.year = Some(y * -1);
-        }
-        if let Some(m) = pdt.month {
-            pdt.month = Some(m * -1);
-        }
-    }
-
-    Ok(())
-}
-
-fn build_parsed_datetime_d(
-    actual: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
-    leading_field: &DateTimeField,
-    value: &str,
-    pdt: &mut ParsedDateTime,
-) -> Result<(), ParserError> {
-    use IntervalToken::*;
-
-    if let Some(Dash) = actual.peek() {
-        // If preceded by '-', assume negative.
-        pdt.is_positive_dur = false;
-        actual.next();
-    }
-
-    let expected = potential_interval_tokens_d(&leading_field)?;
-
-    let mut current_field = leading_field.clone();
-    let mut seconds_seen = 0;
-    let mut neg_num: bool;
-
-    for (i, (atok, etok)) in actual.zip(&expected).enumerate() {
-        match (atok, etok) {
-            (Dash, Dash) | (Space, Space) | (Colon, Colon) | (Dot, Dot) => {
-                /* matching punctuation */
-            }
-            (Num(val), Num(_)) => {
-                let val = *val;
-                match current_field {
-                    DateTimeField::Day => pdt.day = Some(val),
-                    DateTimeField::Hour => pdt.hour = Some(val),
-                    DateTimeField::Minute => pdt.minute = Some(val),
-                    DateTimeField::Second if seconds_seen == 0 => {
-                        seconds_seen += 1;
-                        pdt.second = Some(val);
-                    }
-                    DateTimeField::Second => {
-                        return parser_err!("Too many numbers to parse as a second at {}", val)
-                    }
-                    _ => {
-                        return parser_err!("Invalid field {} in dhms {}", current_field, val);
-                    }
+        match leading_field {
+            Year | Month => {
+                if let Some(y) = pdt.year {
+                    pdt.year = Some(-y);
                 }
-                if current_field != DateTimeField::Second {
-                    current_field = current_field
-                        .into_iter()
-                        .next()
-                        .expect("Exhausted day iterator");
+                if let Some(m) = pdt.month {
+                    pdt.month = Some(-m);
                 }
             }
-            (Nanos(val), Nanos(_)) if seconds_seen == 1 => pdt.nano = Some(*val),
-            (provided, expected) => {
-                return parser_err!(
-                    "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
-                    i,
-                    value,
-                    provided,
-                    expected,
-                )
+            Day => {
+                if let Some(d) = pdt.day {
+                    pdt.day = Some(-d);
+                }
+            }
+            _ => {
+                if let Some(h) = pdt.hour {
+                    pdt.hour = Some(-h);
+                }
+                if let Some(m) = pdt.minute {
+                    pdt.minute = Some(-m);
+                }
+                if let Some(s) = pdt.second {
+                    pdt.second = Some(-s);
+                }
             }
         }
     }
@@ -499,73 +634,11 @@ fn build_parsed_datetime_d(
     Ok(())
 }
 
-fn build_parsed_datetime_hms(
-    actual: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
-    leading_field: &DateTimeField,
-    value: &str,
-    pdt: &mut ParsedDateTime,
-) -> Result<(), ParserError> {
-    use IntervalToken::*;
-
-    if let Some(Dash) = actual.peek() {
-        // If preceded by '-', assume negative.
-        pdt.is_positive_dur = false;
-        actual.next();
-    }
-
-    let expected = potential_interval_tokens_dhms(&leading_field)?;
-
-    let mut current_field = leading_field.clone();
-    let mut seconds_seen = 0;
-    for (i, (atok, etok)) in actual.zip(&expected).enumerate() {
-        match (atok, etok) {
-            (Dash, Dash) | (Space, Space) | (Colon, Colon) | (Dot, Dot) => {
-                /* matching punctuation */
-            }
-            (Num(val), Num(_)) => {
-                let val = *val;
-                match current_field {
-                    DateTimeField::Day => pdt.day = Some(val),
-                    DateTimeField::Hour => pdt.hour = Some(val),
-                    DateTimeField::Minute => pdt.minute = Some(val),
-                    DateTimeField::Second if seconds_seen == 0 => {
-                        seconds_seen += 1;
-                        pdt.second = Some(val);
-                    }
-                    DateTimeField::Second => {
-                        return parser_err!("Too many numbers to parse as a second at {}", val)
-                    }
-                    _ => {
-                        return parser_err!("Invalid field {} in dhms {}", current_field, val);
-                    }
-                }
-                if current_field != DateTimeField::Second {
-                    current_field = current_field
-                        .into_iter()
-                        .next()
-                        .expect("Exhausted day iterator");
-                }
-            }
-            (Nanos(val), Nanos(_)) if seconds_seen == 1 => pdt.nano = Some(*val),
-            (provided, expected) => {
-                return parser_err!(
-                    "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
-                    i,
-                    value,
-                    provided,
-                    expected,
-                )
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn build_parsed_datetime_from_shorthand(
+pub(crate) fn build_parsed_datetime_shorthand(
     tokens: &[IntervalToken],
-    leading_field_ym: &Option<DateTimeField>,
-    leading_field_dhms: &Option<DateTimeField>,
+    leading_field_ym: Option<&DateTimeField>,
+    leading_field_d: Option<&DateTimeField>,
+    leading_field_hms: Option<&DateTimeField>,
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
     let mut actual = tokens.iter().peekable();
@@ -575,11 +648,15 @@ pub(crate) fn build_parsed_datetime_from_shorthand(
     };
 
     if let Some(leading_field_ym) = leading_field_ym {
-        build_parsed_datetime_ym(&mut actual, &leading_field_ym, value, &mut pdt)?;
+        build_parsed_datetime_component(&mut actual, *leading_field_ym, value, &mut pdt)?;
     }
 
-    if let Some(leading_field_dhms) = leading_field_dhms {
-        build_parsed_datetime_dhms(&mut actual, &leading_field_dhms, value, &mut pdt)?;
+    if let Some(leading_field_d) = leading_field_d {
+        build_parsed_datetime_component(&mut actual, *leading_field_d, value, &mut pdt)?;
+    }
+
+    if let Some(leading_field_dhms) = leading_field_hms {
+        build_parsed_datetime_component(&mut actual, *leading_field_dhms, value, &mut pdt)?;
     }
 
     Ok(pdt)
@@ -593,7 +670,7 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
     let split = lc.split(' ').collect::<Vec<&str>>();
     if split.len() % 2 == 0 {
         for i in 0..split.len() / 2 {
-            let mut v = match split[i * 2].parse::<i128>() {
+            let v = match split[i * 2].parse::<i128>() {
                 Ok(v) => v,
                 Err(_) => return parser_err!("Invalid INTERVAL: {:#?}", value),
             };
@@ -605,32 +682,16 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
                     pdt.month = Some(v);
                 }
                 "day" | "days" => {
-                    if v < 0 {
-                        pdt.is_positive_dur = false;
-                        v = v.abs()
-                    }
-                    pdt.day = Some(v as u64);
+                    pdt.day = Some(v);
                 }
                 "hour" | "hours" => {
-                    if v < 0 {
-                        pdt.is_positive_dur = false;
-                        v = v.abs()
-                    }
-                    pdt.hour = Some(v as u64);
+                    pdt.hour = Some(v);
                 }
                 "minute" | "minutes" => {
-                    if v < 0 {
-                        pdt.is_positive_dur = false;
-                        v = v.abs()
-                    }
-                    pdt.minute = Some(v as u64);
+                    pdt.minute = Some(v);
                 }
                 "second" | "seconds" => {
-                    if v < 0 {
-                        pdt.is_positive_dur = false;
-                        v = v.abs()
-                    }
-                    pdt.second = Some(v as u64);
+                    pdt.second = Some(v);
                 }
                 _ => {
                     return parser_err!("Invalid INTERVAL: {:#?}", value);
@@ -702,23 +763,18 @@ mod test {
         use DateTimeField::*;
         use IntervalToken::*;
         assert_eq!(
-            potential_interval_tokens_ym(&Year).unwrap(),
+            potential_interval_tokens(&Year).unwrap(),
             vec![Num(0), Dash, Num(0)]
         );
 
         assert_eq!(
-            potential_interval_tokens_dhms(&Day).unwrap(),
-            vec![
-                Num(0),
-                Space,
-                Num(0),
-                Colon,
-                Num(0),
-                Colon,
-                Num(0),
-                Dot,
-                Nanos(0),
-            ]
+            potential_interval_tokens(&Day).unwrap(),
+            vec![Num(0), Space,]
+        );
+
+        assert_eq!(
+            potential_interval_tokens(&Hour).unwrap(),
+            vec![Num(0), Colon, Num(0), Colon, Num(0), Dot, Nanos(0)]
         );
     }
 

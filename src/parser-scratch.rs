@@ -500,7 +500,7 @@ impl Parser {
         }
     }
 
-    pub fn contains_date_time_str(&mut self, interval: &str) -> Result<bool, ParserError> {
+    pub fn contains_date_time_str(interval: &str) -> Result<bool, ParserError> {
         let upper_case_interval = interval.to_uppercase();
         let date_time_strs = [
             "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS", "DAYS", "HOURS",
@@ -518,7 +518,7 @@ impl Parser {
         use std::convert::TryInto;
 
         let value = self.parse_literal_string()?;
-        let pdt = Self::parse_interval_string_from_shorthand(
+        let pdt = Self::parse_interval_string(
             &value,
             &Some(DateTimeField::Year),
             &Some(DateTimeField::Day),
@@ -911,10 +911,7 @@ impl Parser {
                 // Starts with a number.
                 if let Some('0'..='9') = z.next() {
                 } else {
-                    return parser_err!(format!(
-                        "invalid input syntax for type interval: {}",
-                        interval_str
-                    ));
+                    return parser_err!("invalid input syntax for type interval: {}", interval_str);
                 }
 
                 // Consume any following numbers.
@@ -933,10 +930,10 @@ impl Parser {
                         lead_dhms = Some(DateTimeField::Day)
                     }
                     Some(_) => {
-                        return parser_err!(format!(
+                        return parser_err!(
                             "invalid input syntax for type interval: {}",
                             interval_str
-                        ));
+                        );
                     }
                 }
 
@@ -944,10 +941,10 @@ impl Parser {
                     let inferred_lead_dhms = match self.infer_lead_dhms(v[1]) {
                         Ok(v) => v,
                         Err(_) => {
-                            return parser_err!(format!(
+                            return parser_err!(
                                 "invalid input syntax for type interval: {}",
                                 interval_str
-                            ))
+                            );
                         }
                     };
                     lead_dhms = Some(inferred_lead_dhms);
@@ -965,10 +962,7 @@ impl Parser {
                 // Starts with a number.
                 if let Some('0'..='9') = z.next() {
                 } else {
-                    return parser_err!(format!(
-                        "invalid input syntax for type interval: {}",
-                        interval_str
-                    ));
+                    return parser_err!("invalid input syntax for type interval: {}", interval_str);
                 }
 
                 // Consume any following numbers.
