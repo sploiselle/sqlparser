@@ -1,11 +1,11 @@
 use crate::ast::ParsedDateTime;
 use crate::parser::{DateTimeField, ParserError};
-use std::cmp;
 use std::iter::Iterator;
 
 pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, ParserError> {
     let mut toks = vec![];
     let mut num_buf = String::with_capacity(4);
+    let mut char_buf = String::with_capacity(7);
     println!("tokenize_interval(value: &str) str {}", value);
     fn parse_num(n: &str, idx: usize) -> Result<IntervalToken, ParserError> {
         Ok(IntervalToken::Num(n.parse().map_err(|e| {
@@ -15,47 +15,60 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
             ))
         })?))
     };
+
+    let tokenize_buffers = |i: usize| -> Result<(), ParserError> {
+        if !num_buf.is_empty() {
+            toks.push(parse_num(&num_buf, i)?);
+            num_buf.clear();
+        } else if !char_buf.is_empty() {
+            toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+            char_buf.clear();
+        }
+        Ok(())
+    };
     let mut last_field_is_frac = false;
     for (i, chr) in value.chars().enumerate() {
         match chr {
             '-' => {
-                // dashes at the beginning mean make it negative
-                println!("in -, numbuf {}", num_buf);
-                if !num_buf.is_empty() {
-                    toks.push(parse_num(&num_buf, i)?);
-                    num_buf.clear();
-                }
+                tokenize_buffers(i);
                 toks.push(IntervalToken::Dash);
             }
             ' ' => {
-                println!("in ' ', numbuf {}", num_buf);
-                if !num_buf.is_empty() {
-                    toks.push(parse_num(&num_buf, i)?);
-                    num_buf.clear();
-                }
+                tokenize_buffers(i);
                 toks.push(IntervalToken::Space);
             }
             ':' => {
-                if !num_buf.is_empty() {
-                    toks.push(parse_num(&num_buf, i)?);
-                    num_buf.clear();
-                }
+                tokenize_buffers(i);
                 toks.push(IntervalToken::Colon);
             }
             '.' => {
-                if !num_buf.is_empty() {
-                    toks.push(parse_num(&num_buf, i)?);
-                    num_buf.clear();
-                }
+                tokenize_buffers(i);
                 toks.push(IntervalToken::Dot);
                 last_field_is_frac = true;
             }
-            chr if chr.is_digit(10) => num_buf.push(chr),
+            chr if chr.is_digit(10) => {
+                if !char_buf.is_empty() {
+                    return Err(ParserError::TokenizerError(format!(
+                        "Invalid character at offset {} in {}: {:?}",
+                        i, value, chr
+                    )));
+                }
+                num_buf.push(chr)
+            }
+            chr if chr.is_ascii_alphabetic() => {
+                if !num_buf.is_empty() {
+                    return Err(ParserError::TokenizerError(format!(
+                        "Invalid character at offset {} in {}: {:?}",
+                        i, value, chr
+                    )));
+                }
+                char_buf.push(chr)
+            }
             chr => {
                 return Err(ParserError::TokenizerError(format!(
                     "Invalid character at offset {} in {}: {:?}",
                     i, value, chr
-                )))
+                )));
             }
         }
     }
@@ -183,6 +196,7 @@ fn potential_interval_tokens_ym(from: &DateTimeField) -> Result<Vec<IntervalToke
         Num(0), // year
         Dash,
         Num(0), // month
+        Space,
     ];
     let offset = match from {
         Year => 0,
@@ -198,13 +212,21 @@ fn potential_interval_tokens_ym(from: &DateTimeField) -> Result<Vec<IntervalToke
     Ok(all_toks[offset..].to_vec())
 }
 
-fn potential_interval_tokens_dhms(from: &DateTimeField) -> Result<Vec<IntervalToken>, ParserError> {
-    use DateTimeField::*;
+fn potential_interval_tokens_d(from: &DateTimeField) -> Result<Vec<IntervalToken>, ParserError> {
     use IntervalToken::*;
 
     let all_toks = [
         Num(0), // day
         Space,
+    ];
+    Ok(all_toks.to_vec())
+}
+
+fn potential_interval_tokens_hms(from: &DateTimeField) -> Result<Vec<IntervalToken>, ParserError> {
+    use DateTimeField::*;
+    use IntervalToken::*;
+
+    let all_toks = [
         Num(0), // hour
         Colon,
         Num(0), // minute
@@ -214,10 +236,9 @@ fn potential_interval_tokens_dhms(from: &DateTimeField) -> Result<Vec<IntervalTo
         Nanos(0), // Nanos
     ];
     let offset = match from {
-        Day => 0,
-        Hour => 2,
-        Minute => 4,
-        Second => 6,
+        Hour => 0,
+        Minute => 2,
+        Second => 4,
         _ => {
             return Err(ParserError::ParserError(format!(
                 "Error parsing hms tokens; invalid search key from {}",
@@ -333,10 +354,12 @@ pub(crate) enum IntervalToken {
     Dot,
     Plus,
     Zulu,
-    Num(u64),
+    Num(i128),
     Nanos(u32),
     // String representation of a named timezone e.g. 'EST'
     TzName(String),
+    // String representation of a unit of time e.g. 'YEAR'
+    TimeUnit(String),
 }
 
 fn build_parsed_datetime_ym(
@@ -411,7 +434,72 @@ fn build_parsed_datetime_ym(
     Ok(())
 }
 
-fn build_parsed_datetime_dhms(
+fn build_parsed_datetime_d(
+    actual: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
+    leading_field: &DateTimeField,
+    value: &str,
+    pdt: &mut ParsedDateTime,
+) -> Result<(), ParserError> {
+    use IntervalToken::*;
+
+    if let Some(Dash) = actual.peek() {
+        // If preceded by '-', assume negative.
+        pdt.is_positive_dur = false;
+        actual.next();
+    }
+
+    let expected = potential_interval_tokens_d(&leading_field)?;
+
+    let mut current_field = leading_field.clone();
+    let mut seconds_seen = 0;
+    let mut neg_num: bool;
+
+    for (i, (atok, etok)) in actual.zip(&expected).enumerate() {
+        match (atok, etok) {
+            (Dash, Dash) | (Space, Space) | (Colon, Colon) | (Dot, Dot) => {
+                /* matching punctuation */
+            }
+            (Num(val), Num(_)) => {
+                let val = *val;
+                match current_field {
+                    DateTimeField::Day => pdt.day = Some(val),
+                    DateTimeField::Hour => pdt.hour = Some(val),
+                    DateTimeField::Minute => pdt.minute = Some(val),
+                    DateTimeField::Second if seconds_seen == 0 => {
+                        seconds_seen += 1;
+                        pdt.second = Some(val);
+                    }
+                    DateTimeField::Second => {
+                        return parser_err!("Too many numbers to parse as a second at {}", val)
+                    }
+                    _ => {
+                        return parser_err!("Invalid field {} in dhms {}", current_field, val);
+                    }
+                }
+                if current_field != DateTimeField::Second {
+                    current_field = current_field
+                        .into_iter()
+                        .next()
+                        .expect("Exhausted day iterator");
+                }
+            }
+            (Nanos(val), Nanos(_)) if seconds_seen == 1 => pdt.nano = Some(*val),
+            (provided, expected) => {
+                return parser_err!(
+                    "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
+                    i,
+                    value,
+                    provided,
+                    expected,
+                )
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn build_parsed_datetime_hms(
     actual: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
     leading_field: &DateTimeField,
     value: &str,

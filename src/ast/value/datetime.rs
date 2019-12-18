@@ -77,8 +77,6 @@ impl IntervalValue {
         let mut months = 0i64;
         let mut seconds = 0i128;
         let mut nanos = 0u32;
-        let min_field = &self.precision_low.clone();
-        println!("parsed: {}", self.parsed);
 
         let mut add_field = |d: &DateTimeField| match d {
             Year => {
@@ -99,6 +97,8 @@ impl IntervalValue {
 
         add_field(&self.precision_high);
 
+        let min_field = &self.precision_low.clone();
+        println!("parsed: {}", self.parsed);
         for field in self
             .precision_high
             .clone()
@@ -314,10 +314,10 @@ pub struct ParsedDateTime {
     pub is_positive_dur: bool,
     pub year: Option<i128>,
     pub month: Option<i128>,
-    pub day: Option<u64>,
-    pub hour: Option<u64>,
-    pub minute: Option<u64>,
-    pub second: Option<u64>,
+    pub day: Option<i128>,
+    pub hour: Option<i128>,
+    pub minute: Option<i128>,
+    pub second: Option<i128>,
     pub nano: Option<u32>,
     pub timezone_offset_second: Option<i64>,
 }
