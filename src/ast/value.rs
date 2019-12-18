@@ -93,59 +93,36 @@ impl fmt::Display for Value {
             Value::Interval(IntervalValue {
                 parsed: _,
                 value,
-                leading_field_ym: None,
-                precision_ym: None,
-                leading_field_dhms: Some(DateTimeField::Second),
-                precision_dhms,
-                leading_precision,
+                precision_high,
+                precision_low,
+                leading_precision: Some(leading_precision),
                 fractional_seconds_precision: Some(fractional_seconds_precision),
-            }) => {
-                // When the leading field is SECOND, the parser guarantees that
-                // the last field is None.
-                assert!(precision_dhms.is_none());
-                assert!(leading_precision.is_some());
-                write!(
-                    f,
-                    "INTERVAL '{}' SECOND ({}, {})",
-                    escape_single_quote_string(value),
-                    leading_precision.unwrap(),
-                    fractional_seconds_precision
-                )
-            }
+            }) => write!(
+                f,
+                "INTERVAL '{}' SECOND ({}, {})",
+                escape_single_quote_string(value),
+                leading_precision,
+                fractional_seconds_precision
+            ),
             Value::Interval(IntervalValue {
                 parsed: _,
                 value,
-                leading_field_ym,
-                precision_ym,
-                leading_field_dhms,
-                precision_dhms,
+                precision_high,
+                precision_low,
                 leading_precision,
                 fractional_seconds_precision,
             }) => {
-                // SEAN: How to return error here?
-                if let Some(leading_field) = leading_field_ym {
-                    write!(
-                        f,
-                        "INTERVAL '{}' {}",
-                        escape_single_quote_string(value),
-                        leading_field
-                    )?;
-                } else if let Some(leading_field) = leading_field_dhms {
-                    write!(
-                        f,
-                        "INTERVAL '{}' {}",
-                        escape_single_quote_string(value),
-                        leading_field
-                    )?;
-                }
+                write!(
+                    f,
+                    "INTERVAL '{}' {}",
+                    escape_single_quote_string(value),
+                    precision_high
+                )?;
                 if let Some(leading_precision) = leading_precision {
                     write!(f, " ({})", leading_precision)?;
                 }
-                if let Some(last_field) = precision_ym {
-                    write!(f, " TO {}", last_field)?;
-                } else if let Some(last_field) = precision_dhms {
-                    write!(f, " TO {}", last_field)?;
-                }
+                write!(f, " TO {}", precision_low)?;
+
                 if let Some(fractional_seconds_precision) = fractional_seconds_precision {
                     write!(f, " ({})", fractional_seconds_precision)?;
                 }

@@ -11,9 +11,6 @@ pub struct IntervalValue {
     pub parsed: ParsedDateTime,
     /// The unit of the first field in the interval. `INTERVAL 'T' MINUTE`
     /// means `T` is in minutes
-    pub leading_field_ym: Option<DateTimeField>,
-
-    pub leading_field_dhms: Option<DateTimeField>,
     /// How many digits the leading field is allowed to occupy.
     ///
     /// The interval `INTERVAL '1234' MINUTE(3)` is **illegal**, but `INTERVAL
@@ -37,13 +34,26 @@ pub struct IntervalValue {
     ///   seconds.
     /// * In `INTERVAL '1:1:1' HOURS TO MINUTES` the interval should be
     ///   equivalent to `3660` seconds.
-    pub precision_ym: Option<DateTimeField>,
-    pub precision_dhms: Option<DateTimeField>,
+    pub precision_high: DateTimeField,
+    pub precision_low: DateTimeField,
     /// The seconds precision can be specified in SQL source as
     /// `INTERVAL '__' SECOND(_, x)` (in which case the `leading_field`
     /// will be `Second` and the `last_field` will be `None`),
     /// or as `__ TO SECOND(x)`.
     pub fractional_seconds_precision: Option<u64>,
+}
+
+impl Default for IntervalValue {
+    fn default() -> Self {
+        Self {
+            value: String::default(),
+            parsed: ParsedDateTime::default(),
+            precision_high: DateTimeField::Year,
+            precision_low: DateTimeField::Second,
+            leading_precision: None,
+            fractional_seconds_precision: None,
+        }
+    }
 }
 
 impl IntervalValue {
@@ -64,76 +74,51 @@ impl IntervalValue {
     /// LAST` field is larger than the `LEAD`.
     pub fn computed_permissive(&self) -> Result<Interval, ValueError> {
         use DateTimeField::*;
+        let mut months = 0i64;
+        let mut seconds = 0i128;
+        let mut nanos = 0u32;
+        let min_field = &self.precision_low.clone();
+        println!("parsed: {}", self.parsed);
 
-        let calc_months = match &self.leading_field_ym {
-            Some(Year) => match &self.precision_ym {
-                Some(Month) | None => Ok(self.parsed.year.unwrap_or(0) as i64 * 12
-                    + self.parsed.month.unwrap_or(0) as i64),
-                Some(Year) => Ok(self.parsed.year.unwrap_or(0) as i64 * 12),
-                Some(invalid) => Err(ValueError(format!(
-                    "Invalid specifier for YEAR precision: {}",
-                    &invalid
-                ))),
-            },
-            Some(Month) => match &self.precision_ym {
-                Some(Month) | None => Ok(self.parsed.month.unwrap_or(0) as i64),
-                Some(invalid) => Err(ValueError(format!(
-                    "Invalid specifier for MONTH precision: {}",
-                    &invalid
-                ))),
-            },
-            _ => Ok(0),
+        let mut add_field = |d: &DateTimeField| match d {
+            Year => {
+                if let Some(v) = self.parsed.year {
+                    println!("I see {} years ", v);
+                } else {
+                    println!("Year is none ");
+                }
+                months += self.parsed.year.unwrap_or(0) as i64 * 12;
+            }
+            Month => months += self.parsed.month.unwrap_or(0) as i64,
+            f => {
+                if let Some(time) = self.units_of(&f) {
+                    seconds += time * seconds_multiplier(&f);
+                }
+            }
         };
 
-        let calc_dur = match &self.leading_field_dhms {
-            Some(durationlike_field) => {
-                let mut seconds = 0i128;
+        add_field(&self.precision_high);
 
-                if let Some(time) = self.units_of(&durationlike_field) {
-                    seconds += time * seconds_multiplier(&durationlike_field);
-                }
-
-                // min_field is either an explicitly defined minimum field,
-                // or converts None to the finest degree of granularity (seconds)
-                let min_field = &self
-                    .precision_dhms
-                    .clone()
-                    .unwrap_or_else(|| DateTimeField::Second);
-                print!("min_field {}", min_field);
-                for field in durationlike_field
-                    .clone()
-                    .into_iter()
-                    .take_while(|f| f <= min_field)
-                {
-                    if let Some(time) = self.units_of(&field) {
-                        seconds += time * seconds_multiplier(&field);
-                    }
-                }
-                let duration = match (min_field, self.parsed.nano) {
-                    (DateTimeField::Second, Some(nanos)) => Duration::new(seconds as u64, nanos),
-                    (_, _) => Duration::from_secs(seconds as u64),
-                };
-
-                println!("Total seconds {}", seconds);
-                Ok((duration, self.parsed.is_positive_dur))
-            }
-            None => Ok((Duration::new(0, 0), true)),
-        };
-
-        match (calc_months, calc_dur) {
-            (Ok(cm), Ok(cd)) => {
-                let c_dur = cd.0;
-                let c_pos = cd.1;
-
-                Ok(Interval {
-                    months: cm,
-                    duration: c_dur,
-                    is_positive: c_pos,
-                })
-            }
-            (Err(v), _) => Err(v),
-            (_, Err(v)) => Err(v),
+        for field in self
+            .precision_high
+            .clone()
+            .into_iter()
+            .take_while(|f| f <= min_field)
+        {
+            add_field(&field);
         }
+
+        if self.precision_high == Second || *min_field == Second {
+            if let Some(n) = self.parsed.nano {
+                nanos += n;
+            }
+        }
+
+        Ok(Interval {
+            months,
+            duration: Duration::new(seconds as u64, nanos),
+            is_positive: self.parsed.is_positive_dur,
+        })
     }
 
     /// Retrieve the number that we parsed out of the literal string for the `field`
@@ -326,8 +311,6 @@ pub struct ParsedDateTime {
     // is_amibiguous might have its value's change;
     // you should not assume that the ParsedDateTime
     // is "correct" until is_ambiguous is false.
-    pub is_ambiguous: bool,
-    pub is_positive_mon: bool,
     pub is_positive_dur: bool,
     pub year: Option<i128>,
     pub month: Option<i128>,
@@ -342,8 +325,6 @@ pub struct ParsedDateTime {
 impl Default for ParsedDateTime {
     fn default() -> ParsedDateTime {
         ParsedDateTime {
-            is_ambiguous: false,
-            is_positive_mon: true,
             is_positive_dur: true,
             year: None,
             month: None,
@@ -354,6 +335,32 @@ impl Default for ParsedDateTime {
             nano: None,
             timezone_offset_second: None,
         }
+    }
+}
+
+impl fmt::Display for ParsedDateTime {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(v) = self.year {
+            write!(f, "{} year ", v)?;
+        }
+        if let Some(v) = self.month {
+            write!(f, "{} month ", v)?;
+        }
+        if let Some(v) = self.day {
+            write!(f, "{} day ", v)?;
+        }
+        if let Some(v) = self.hour {
+            write!(f, "{} hour ", v)?;
+        }
+        if let Some(v) = self.minute {
+            write!(f, "{} minute ", v)?;
+        }
+        if let Some(v) = self.second {
+            write!(f, "{} second ", v)?;
+        }
+
+        Ok(())
     }
 }
 

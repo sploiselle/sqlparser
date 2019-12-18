@@ -500,46 +500,23 @@ pub(crate) fn build_parsed_datetime_from_shorthand(
 pub(crate) fn build_parsed_datetime_from_datetime_str(
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
-    // SEAN: NEED TO DETERMINE WHERE NEGATIVE IS USED
-    // Hack to allow INTERVAL types like:
-    // INTERVAL '-30 day'
-
     let mut pdt = ParsedDateTime::default();
     let lc = value.to_lowercase();
     let split = lc.split(' ').collect::<Vec<&str>>();
     if split.len() % 2 == 0 {
-        let track_seen_field = |field_track: &mut i32, field_max: &mut i32, val: i32| {
-            if *field_track <= val {
-                return parser_err!("Invalid INTERVAL: {:#?}", value);
-            } else {
-                *field_track = val;
-                *field_max = cmp::max(val, *field_max);
-                Ok(())
-            }
-        };
-
-        let mut ym_max = 0;
-        let mut dhms_max = 0;
-        let mut ym_track = i32::max_value();
-        let mut dhms_track = i32::max_value();
-
         for i in 0..split.len() / 2 {
             let mut v = match split[i * 2].parse::<i128>() {
                 Ok(v) => v,
                 Err(_) => return parser_err!("Invalid INTERVAL: {:#?}", value),
             };
-
             match split[i * 2 + 1] {
                 "year" | "years" => {
-                    track_seen_field(&mut ym_track, &mut ym_max, 2)?;
                     pdt.year = Some(v);
                 }
                 "month" | "months" => {
-                    track_seen_field(&mut ym_track, &mut ym_max, 1)?;
                     pdt.month = Some(v);
                 }
                 "day" | "days" => {
-                    track_seen_field(&mut dhms_track, &mut dhms_max, 8)?;
                     if v < 0 {
                         pdt.is_positive_dur = false;
                         v = v.abs()
@@ -547,7 +524,6 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
                     pdt.day = Some(v as u64);
                 }
                 "hour" | "hours" => {
-                    track_seen_field(&mut dhms_track, &mut dhms_max, 4)?;
                     if v < 0 {
                         pdt.is_positive_dur = false;
                         v = v.abs()
@@ -555,7 +531,6 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
                     pdt.hour = Some(v as u64);
                 }
                 "minute" | "minutes" => {
-                    track_seen_field(&mut dhms_track, &mut dhms_max, 2)?;
                     if v < 0 {
                         pdt.is_positive_dur = false;
                         v = v.abs()
@@ -563,7 +538,6 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
                     pdt.minute = Some(v as u64);
                 }
                 "second" | "seconds" => {
-                    track_seen_field(&mut dhms_track, &mut dhms_max, 1)?;
                     if v < 0 {
                         pdt.is_positive_dur = false;
                         v = v.abs()
