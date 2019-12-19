@@ -76,15 +76,10 @@ impl IntervalValue {
         use DateTimeField::*;
         let mut months = 0i64;
         let mut seconds = 0i128;
-        let mut nanos = 0u32;
+        let mut nanos = 0i64;
 
         let mut add_field = |d: DateTimeField| match d {
             Year => {
-                if let Some(v) = self.parsed.year {
-                    println!("I see {} years ", v);
-                } else {
-                    println!("Year is none ");
-                }
                 months += self.parsed.year.unwrap_or(0) as i64 * 12;
             }
             Month => months += self.parsed.month.unwrap_or(0) as i64,
@@ -114,10 +109,26 @@ impl IntervalValue {
             }
         }
 
+        if nanos < 0 && seconds > 0 {
+            if let Some(n) = 1_000_000_000i64.checked_add(nanos) {
+                nanos = n;
+                seconds -= 1;
+            } else {
+                return Err(ValueError(format!("Nanos in INTERVAL overflowed")));
+            }
+        } else if nanos > 0 && seconds < 0 {
+            if let Some(n) = 1_000_000_000i64.checked_sub(nanos) {
+                nanos = -n;
+                seconds += 1;
+            } else {
+                return Err(ValueError(format!("Nanos in INTERVAL overflowed")));
+            }
+        }
+
         Ok(Interval {
             months,
-            duration: Duration::new(seconds.abs() as u64, nanos),
-            is_positive: seconds >= 0,
+            duration: Duration::new(seconds.abs() as u64, nanos.abs() as u32),
+            is_positive: seconds >= 0 && nanos >= 0,
         })
     }
 
@@ -314,7 +325,7 @@ pub struct ParsedDateTime {
     pub hour: Option<i128>,
     pub minute: Option<i128>,
     pub second: Option<i128>,
-    pub nano: Option<u32>,
+    pub nano: Option<i64>,
     pub timezone_offset_second: Option<i64>,
 }
 
@@ -353,6 +364,9 @@ impl fmt::Display for ParsedDateTime {
         }
         if let Some(v) = self.second {
             write!(f, "{} second ", v)?;
+        }
+        if let Some(v) = self.nano {
+            write!(f, "{} nanos ", v)?;
         }
 
         Ok(())

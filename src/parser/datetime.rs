@@ -16,19 +16,14 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
         })?))
     };
 
-    // let tokenize_buffers = |i: usize| -> Result<(), ParserError> {
-    //     if !num_buf.is_empty() {
-    //         toks.push(parse_num(&num_buf, i)?);
-    //         num_buf.clear();
-    //     } else if !char_buf.is_empty() {
-    //         toks.push(IntervalToken::TimeUnit(char_buf.clone()));
-    //         char_buf.clear();
-    //     }
-    //     Ok(())
-    // };
-
     let mut last_field_is_frac = false;
     for (i, chr) in value.chars().enumerate() {
+        if !num_buf.is_empty() && !char_buf.is_empty() {
+            return Err(ParserError::TokenizerError(format!(
+                "Invalid INTERVAL '{}': could not tokenize",
+                value
+            )));
+        }
         match chr {
             '-' => {
                 if !num_buf.is_empty() {
@@ -101,7 +96,7 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
         if !last_field_is_frac {
             toks.push(parse_num(&num_buf, 0)?);
         } else {
-            let raw: u32 = num_buf.parse().map_err(|e| {
+            let raw: i64 = num_buf.parse().map_err(|e| {
                 ParserError::ParserError(format!(
                     "couldn't parse fraction of second {}: {}",
                     num_buf, e
@@ -109,10 +104,12 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
             })?;
             // this is guaranteed to be ascii, so len is fine
             let chars = num_buf.len() as u32;
-            let multiplicand = 1_000_000_000 / 10_u32.pow(chars);
+            let multiplicand = 1_000_000_000 / 10_i64.pow(chars);
 
             toks.push(IntervalToken::Nanos(raw * multiplicand));
         }
+    } else if !char_buf.is_empty() {
+        toks.push(IntervalToken::TimeUnit(char_buf.clone()));
     }
     Ok(toks)
 }
@@ -237,7 +234,7 @@ pub(crate) fn determine_interval_parse_heads(
     let lead_hms_determ = |s: &str| -> Result<Option<DateTimeField>, ParserError> {
         let mut z = s.chars().peekable();
 
-        if trim_and_check_leading_sign_numbers(&mut z).is_err() {
+        if trim_leading_colons_sign_numbers(&mut z).is_err() {
             return parser_err!(format!(
                 "invalid input syntax for type interval: {}",
                 interval_str
@@ -292,7 +289,7 @@ pub(crate) fn determine_interval_parse_heads(
             let lead_d;
             let mut z = v[0].chars().peekable();
 
-            if trim_and_check_leading_sign_numbers(&mut z).is_err() {
+            if trim_leading_colons_sign_numbers(&mut z).is_err() {
                 return parser_err!(format!(
                     "invalid input syntax for type interval: {}",
                     interval_str
@@ -322,7 +319,7 @@ pub(crate) fn determine_interval_parse_heads(
         1 => {
             let mut z = interval_str.chars().peekable();
 
-            if trim_and_check_leading_sign_numbers(&mut z).is_err() {
+            if trim_leading_colons_sign_numbers(&mut z).is_err() {
                 return parser_err!(format!(
                     "invalid input syntax for type interval: {}",
                     interval_str
@@ -345,9 +342,8 @@ pub(crate) fn determine_interval_parse_heads(
     }
 }
 
-// Trim values equivalent to the regex (-[0-9]+).
-// Returns an error if does not contain 1 number.
-fn trim_and_check_leading_sign_numbers(
+// Trim values equivalent to the regex (:*-?[0-9]*).
+fn trim_leading_colons_sign_numbers(
     z: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> Result<(), ParserError> {
     // PostgreSQL inexplicably trims all leading colons from interval sections.
@@ -358,11 +354,6 @@ fn trim_and_check_leading_sign_numbers(
     // Consume leading negative sign from any field.
     if let Some('-') = z.peek() {
         z.next();
-    }
-    // Ensure first non-dash character is a number.
-    if let Some('0'..='9') = z.next() {
-    } else {
-        return parser_err!("Interval component does not begin with number");
     }
 
     // Consume all following numbers.
@@ -517,7 +508,7 @@ pub(crate) enum IntervalToken {
     Plus,
     Zulu,
     Num(i128),
-    Nanos(u32),
+    Nanos(i64),
     // String representation of a named timezone e.g. 'EST'
     TzName(String),
     // String representation of a unit of time e.g. 'YEAR'
@@ -595,6 +586,7 @@ fn build_parsed_datetime_component(
                             );
                         }
                     }
+                    // Advance to next field.
                     if current_field != DateTimeField::Second {
                         current_field = current_field
                             .into_iter()
@@ -616,7 +608,16 @@ fn build_parsed_datetime_component(
                 // Allow skipping expexted numbers. The parser has already validated that each
                 // interval part beings with a number, so this is less cavalier than it appears.
                 (_, Num(_)) => {
+                    println!("Skipping expected number");
                     expected.next();
+
+                    // Advance to next field.
+                    if current_field != DateTimeField::Second {
+                        current_field = current_field
+                            .into_iter()
+                            .next()
+                            .expect("Exhausted iterator");
+                    }
                 }
                 (provided, expected) => {
                     return parser_err!(
@@ -663,6 +664,9 @@ fn build_parsed_datetime_component(
                 if let Some(s) = pdt.second {
                     pdt.second = Some(-s);
                 }
+                if let Some(n) = pdt.nano {
+                    pdt.nano = Some(-n);
+                }
             }
         }
     }
@@ -698,46 +702,133 @@ pub(crate) fn build_parsed_datetime_shorthand(
     Ok(pdt)
 }
 
+use std::collections::VecDeque;
+
 pub(crate) fn build_parsed_datetime_from_datetime_str(
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
+    use DateTimeField::*;
+    use IntervalToken::*;
+
+    let mut expected = VecDeque::with_capacity(7);
+    expected.push_back(Dash);
+    expected.push_back(Num(0));
+    expected.push_back(Dot);
+    expected.push_back(Nanos(0));
+    expected.push_back(Space);
+    expected.push_back(TimeUnit(String::default()));
+    expected.push_back(Space);
+
+    let mut expected_i = 0;
+
+    let t = tokenize_interval(value)?;
+    let mut actual = t.iter().peekable();
+
+    let mut is_negative = 1;
+    let mut seen_int = false;
+    let mut num_buf = 0i128;
+    let mut nano_buf = 0i64;
     let mut pdt = ParsedDateTime::default();
-    let lc = value.to_lowercase();
-    let split = lc.split(' ').collect::<Vec<&str>>();
-    if split.len() % 2 == 0 {
-        for i in 0..split.len() / 2 {
-            let v = match split[i * 2].parse::<i128>() {
-                Ok(v) => v,
-                Err(_) => return parser_err!("Invalid INTERVAL: {:#?}", value),
-            };
-            match split[i * 2 + 1] {
-                "year" | "years" => {
-                    pdt.year = Some(v);
+
+    println!(
+        "build_parsed_datetime_from_datetime_str\nactual.len() {}",
+        actual.len()
+    );
+
+    while let Some(atok) = actual.peek() {
+        if let Some(etok) = expected.get(expected_i) {
+            println!("expected_i {}", expected_i);
+            expected_i += 1;
+            expected_i %= expected.len();
+            match (atok, etok) {
+                (Dash, Dash) => {
+                    println!("Matching dash");
+                    actual.next();
+                    is_negative = -1;
                 }
-                "month" | "months" => {
-                    pdt.month = Some(v);
+                (_, Dash) => {}
+                (Dot, Dot) if seen_int => {
+                    println!("Matching dot");
+                    actual.next();
                 }
-                "day" | "days" => {
-                    pdt.day = Some(v);
+                (Num(n), Num(_)) if !seen_int => {
+                    println!("Got int {}", n);
+                    actual.next();
+
+                    seen_int = true;
+
+                    match actual.peek() {
+                        Some(Space) => expected_i += 2,
+                        Some(Dot) => {}
+                        _ => {
+                            return parser_err!("Invalid INTERVAL: {:#?}", value);
+                        }
+                    }
+                    num_buf = *n;
                 }
-                "hour" | "hours" => {
-                    pdt.hour = Some(v);
+                (Num(n), Nanos(_)) if seen_int => {
+                    println!("Got nano {}", n);
+                    actual.next();
+                    let num_digit = (*n as f64).log10();
+                    let multiplicand = 100_000_000 / 10_i64.pow(num_digit as u32);
+
+                    nano_buf = (*n as i64) * multiplicand;
                 }
-                "minute" | "minutes" => {
-                    pdt.minute = Some(v);
+                // Allow skipping past the first int
+                (_, Num(_)) if !seen_int => {
+                    seen_int = true;
                 }
-                "second" | "seconds" => {
-                    pdt.second = Some(v);
+                (Space, Space) if seen_int => {
+                    println!("Space seen_int");
+                    actual.next();
+                    seen_int = false;
                 }
-                _ => {
-                    return parser_err!("Invalid INTERVAL: {:#?}", value);
+                (Space, Space) if !seen_int => {
+                    println!("Space !seen_int; resetting tracking");
+                    actual.next();
+                    is_negative = 1;
+                    num_buf = 0;
+                    nano_buf = 0;
                 }
+                (TimeUnit(f), TimeUnit(_)) => {
+                    println!("I think this TimeUnit is f {}", f);
+                    actual.next();
+
+                    match f.as_ref() {
+                        "year" | "years" if pdt.year.is_none() => {
+                            pdt.year = Some(num_buf * is_negative);
+                        }
+                        "month" | "months" if pdt.month.is_none() => {
+                            pdt.month = Some(num_buf * is_negative);
+                        }
+                        "day" | "days" if pdt.day.is_none() => {
+                            pdt.day = Some(num_buf * is_negative);
+                        }
+                        "hour" | "hours" if pdt.hour.is_none() => {
+                            pdt.hour = Some(num_buf * is_negative);
+                        }
+                        "minute" | "minutes" if pdt.minute.is_none() => {
+                            pdt.minute = Some(num_buf * is_negative);
+                        }
+                        "second" | "seconds" if pdt.second.is_none() => {
+                            if num_buf > 0 {
+                                pdt.second = Some(num_buf * is_negative);
+                            }
+                            if nano_buf > 0 {
+                                pdt.nano = Some(nano_buf * is_negative as i64);
+                            }
+                        }
+                        _ => {
+                            return parser_err!("Invalid INTERVAL: {:#?}", value);
+                        }
+                    }
+                }
+                (_, _) => return parser_err!("Invalid INTERVAL: {:#?}", value),
             }
         }
-        Ok(pdt)
-    } else {
-        return parser_err!("Invalid INTERVAL: {:#?}", value);
     }
+
+    Ok(pdt)
 }
 
 /// Takes a 'date timezone' 'date time timezone' string and splits
@@ -799,17 +890,17 @@ mod test {
         use DateTimeField::*;
         use IntervalToken::*;
         assert_eq!(
-            potential_interval_tokens(&Year).unwrap(),
+            potential_interval_tokens(Year).unwrap(),
             vec![Num(0), Dash, Num(0)]
         );
 
         assert_eq!(
-            potential_interval_tokens(&Day).unwrap(),
+            potential_interval_tokens(Day).unwrap(),
             vec![Num(0), Space,]
         );
 
         assert_eq!(
-            potential_interval_tokens(&Hour).unwrap(),
+            potential_interval_tokens(Hour).unwrap(),
             vec![Num(0), Colon, Num(0), Colon, Num(0), Dot, Nanos(0)]
         );
     }

@@ -650,7 +650,7 @@ impl Parser {
                             hour,
                             minute,
                             second,
-                            nano: nano.unwrap_or(0),
+                            nano: nano.unwrap_or(0) as u32,
                             timezone_offset_second: timezone_offset_second.unwrap_or(0),
                         },
                     ));
@@ -665,7 +665,7 @@ impl Parser {
                         hour,
                         minute,
                         second,
-                        nano: nano.unwrap_or(0),
+                        nano: nano.unwrap_or(0) as u32,
                         timezone_offset_second: 0,
                     },
                 ))
