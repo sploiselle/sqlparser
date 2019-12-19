@@ -547,62 +547,96 @@ fn build_parsed_datetime_component(
     }
 
     let expected = potential_interval_tokens(leading_field);
+    let mut expected = expected.iter().peekable();
     let mut seconds_seen = 0;
 
     println!("Tokens left {}", actual.len());
 
     let mut current_field = leading_field;
-    for (i, (atok, etok)) in actual.zip(&expected).enumerate() {
-        println!("In build_parsed_datetime_component pdt: {}", pdt);
-        match (atok, etok) {
-            (Dash, Dash) | (Colon, Colon) | (Dot, Dot) => {
-                /* matching punctuation */
-                println!("Matching punctuation");
-            }
-            (Num(val), Num(_)) => {
-                println!("Matching numbers");
-                let val = *val;
-                match current_field {
-                    DateTimeField::Year => pdt.year = Some(val as i128),
-                    DateTimeField::Month => pdt.month = Some(val as i128),
-                    DateTimeField::Day => pdt.day = Some(val),
-                    DateTimeField::Hour => pdt.hour = Some(val),
-                    DateTimeField::Minute => pdt.minute = Some(val),
-                    DateTimeField::Second if seconds_seen == 0 => {
-                        println!("Seeing a second...");
-                        seconds_seen += 1;
-                        pdt.second = Some(val);
+
+    let mut i = 0u8;
+
+    while let Some(etok) = expected.peek() {
+        if let Some(atok) = actual.peek() {
+            match (atok, etok) {
+                (Dash, Dash) | (Colon, Colon) => {
+                    /* matching punctuation */
+                    expected.next();
+                    actual.next();
+
+                    println!("Matching punctuation");
+                }
+                (Dot, Dot) => {
+                    expected.next();
+                    actual.next();
+                    seconds_seen = 1;
+                }
+                (Num(val), Num(_)) => {
+                    println!("Matching numbers");
+                    expected.next();
+                    actual.next();
+                    let val = *val;
+                    match current_field {
+                        DateTimeField::Year => pdt.year = Some(val as i128),
+                        DateTimeField::Month => pdt.month = Some(val as i128),
+                        DateTimeField::Day => pdt.day = Some(val),
+                        DateTimeField::Hour => pdt.hour = Some(val),
+                        DateTimeField::Minute => pdt.minute = Some(val),
+                        DateTimeField::Second if seconds_seen == 0 => {
+                            println!("Seeing a second...");
+                            seconds_seen += 1;
+                            pdt.second = Some(val);
+                        }
+                        _ => {
+                            return parser_err!(
+                                "Invalid interval field {} in {}",
+                                current_field,
+                                val
+                            );
+                        }
                     }
-                    _ => {
-                        return parser_err!("Invalid field {} in ym {}", current_field, val);
+                    if current_field != DateTimeField::Second {
+                        current_field = current_field
+                            .into_iter()
+                            .next()
+                            .expect("Exhausted iterator");
                     }
                 }
-                if current_field != DateTimeField::Second {
-                    current_field = current_field
-                        .into_iter()
-                        .next()
-                        .expect("Exhausted day iterator");
+                (Nanos(val), Nanos(_)) if seconds_seen == 1 => {
+                    expected.next();
+                    actual.next();
+                    pdt.nano = Some(*val)
+                }
+                // Break out of this component if you encounter a space.
+                (Space, _) => {
+                    println!("Exit early");
+                    actual.next();
+                    break;
+                }
+                // Allow skipping expexted numbers. The parser has already validated that each
+                // interval part beings with a number, so this is less cavalier than it appears.
+                (_, Num(_)) => {
+                    expected.next();
+                }
+                (provided, expected) => {
+                    return parser_err!(
+                        "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
+                        i,
+                        value,
+                        provided,
+                        expected,
+                    )
                 }
             }
-            (Nanos(val), Nanos(_)) if seconds_seen == 1 => pdt.nano = Some(*val),
-            // Break out of this component if you encounter a space.
-            (Space, _) => {
-                println!("Exit early");
-                return Ok(());
-            }
-            (provided, expected) => {
-                return parser_err!(
-                    "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
-                    i,
-                    value,
-                    provided,
-                    expected,
-                )
-            }
-        }
+        } else {
+            break;
+        };
+
+        i += 1;
     }
 
     if !is_positive {
+        println!("is negative");
         match leading_field {
             Year | Month => {
                 if let Some(y) = pdt.year {
@@ -613,7 +647,9 @@ fn build_parsed_datetime_component(
                 }
             }
             Day => {
+                println!("is negative day");
                 if let Some(d) = pdt.day {
+                    println!("negating day");
                     pdt.day = Some(-d);
                 }
             }

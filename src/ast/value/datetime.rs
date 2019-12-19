@@ -78,7 +78,7 @@ impl IntervalValue {
         let mut seconds = 0i128;
         let mut nanos = 0u32;
 
-        let mut add_field = |d: &DateTimeField| match d {
+        let mut add_field = |d: DateTimeField| match d {
             Year => {
                 if let Some(v) = self.parsed.year {
                     println!("I see {} years ", v);
@@ -89,13 +89,13 @@ impl IntervalValue {
             }
             Month => months += self.parsed.month.unwrap_or(0) as i64,
             f => {
-                if let Some(time) = self.units_of(&f) {
-                    seconds += time * seconds_multiplier(&f);
+                if let Some(time) = self.units_of(f) {
+                    seconds += time * seconds_multiplier(f);
                 }
             }
         };
 
-        add_field(&self.precision_high);
+        add_field(self.precision_high);
 
         let min_field = &self.precision_low.clone();
         println!("parsed: {}", self.parsed);
@@ -105,7 +105,7 @@ impl IntervalValue {
             .into_iter()
             .take_while(|f| f <= min_field)
         {
-            add_field(&field);
+            add_field(field);
         }
 
         if self.precision_high == Second || *min_field == Second {
@@ -116,13 +116,13 @@ impl IntervalValue {
 
         Ok(Interval {
             months,
-            duration: Duration::new(seconds as u64, nanos),
-            is_positive: self.parsed.is_positive_dur,
+            duration: Duration::new(seconds.abs() as u64, nanos),
+            is_positive: seconds >= 0,
         })
     }
 
     /// Retrieve the number that we parsed out of the literal string for the `field`
-    fn units_of(&self, field: &DateTimeField) -> Option<i128> {
+    fn units_of(&self, field: DateTimeField) -> Option<i128> {
         match field {
             DateTimeField::Year => self.parsed.year,
             DateTimeField::Month => self.parsed.month,
@@ -247,7 +247,7 @@ impl IntervalValue {
 //         .join(", ")
 // }
 
-fn seconds_multiplier(field: &DateTimeField) -> i128 {
+fn seconds_multiplier(field: DateTimeField) -> i128 {
     match field {
         DateTimeField::Day => 60 * 60 * 24,
         DateTimeField::Hour => 60 * 60,
@@ -308,10 +308,6 @@ pub struct ParsedTimestamp {
 /// [`ParsedTimestamp`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParsedDateTime {
-    // is_amibiguous might have its value's change;
-    // you should not assume that the ParsedDateTime
-    // is "correct" until is_ambiguous is false.
-    pub is_positive_dur: bool,
     pub year: Option<i128>,
     pub month: Option<i128>,
     pub day: Option<i128>,
@@ -325,7 +321,6 @@ pub struct ParsedDateTime {
 impl Default for ParsedDateTime {
     fn default() -> ParsedDateTime {
         ParsedDateTime {
-            is_positive_dur: true,
             year: None,
             month: None,
             day: None,
