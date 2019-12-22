@@ -223,14 +223,8 @@ fn tokenize_timezone(value: &str) -> Result<Vec<IntervalToken>, ParserError> {
 // and _dhms for the latter.
 pub(crate) fn determine_interval_parse_heads(
     interval_str: &str,
-) -> Result<
-    (
-        Option<DateTimeField>,
-        Option<DateTimeField>,
-        Option<DateTimeField>,
-    ),
-    ParserError,
-> {
+    ambiguous_resolver: Option<DateTimeField>,
+) -> Result<IntervalDatetimeParseKey, ParserError> {
     let lead_hms_determ = |s: &str| -> Result<Option<DateTimeField>, ParserError> {
         let mut z = s.chars().peekable();
 
@@ -278,11 +272,11 @@ pub(crate) fn determine_interval_parse_heads(
 
     match v.len() {
         // Implies {Y... }{D }{...}
-        3 => Ok((
-            Some(DateTimeField::Year),
-            Some(DateTimeField::Day),
-            lead_hms_determ(v[2])?,
-        )),
+        3 => Ok(IntervalDatetimeParseKey {
+            ym: Some(DateTimeField::Year),
+            d: Some(DateTimeField::Day),
+            hms: lead_hms_determ(v[2])?,
+        }),
         // Implies {?}{?}{...}
         2 => {
             let lead_ym;
@@ -314,7 +308,12 @@ pub(crate) fn determine_interval_parse_heads(
                     ));
                 }
             }
-            Ok((lead_ym, lead_d, lead_hms_determ(v[1])?))
+
+            Ok(IntervalDatetimeParseKey {
+                ym: lead_ym,
+                d: lead_d,
+                hms: lead_hms_determ(v[1])?,
+            })
         }
         1 => {
             let mut z = interval_str.chars().peekable();
@@ -328,11 +327,35 @@ pub(crate) fn determine_interval_parse_heads(
 
             match z.next() {
                 // Implies {Y-...}{}{}
-                Some('-') => Ok((Some(DateTimeField::Year), None, None)),
+                Some('-') => Ok(IntervalDatetimeParseKey {
+                    ym: Some(DateTimeField::Year),
+                    ..Default::default()
+                }),
                 // Implies {}{}{...}
-                Some(_) => Ok((None, None, lead_hms_determ(interval_str)?)),
+                Some(_) => Ok(IntervalDatetimeParseKey {
+                    hms: lead_hms_determ(interval_str)?,
+                    ..Default::default()
+                }),
                 // Implies {?}{?}{?}, ambiguous case.
-                None => Ok((None, None, None)),
+                None => {
+                    let mut key = IntervalDatetimeParseKey {
+                        ..Default::default()
+                    };
+                    match ambiguous_resolver {
+                        Some(DateTimeField::Year) | Some(DateTimeField::Month) => {
+                            key.ym = ambiguous_resolver
+                        }
+                        Some(DateTimeField::Day) => key.d = ambiguous_resolver,
+                        Some(_) => key.hms = ambiguous_resolver,
+                        None => {
+                            return parser_err!(
+                                "Cannot parse INTERVAL '{}' without ambiguous resolver",
+                                interval_str
+                            )
+                        }
+                    }
+                    Ok(key)
+                }
             }
         }
         _ => parser_err!(format!(
@@ -605,8 +628,7 @@ fn build_parsed_datetime_component(
                     actual.next();
                     break;
                 }
-                // Allow skipping expexted numbers. The parser has already validated that each
-                // interval part beings with a number, so this is less cavalier than it appears.
+                // Allow skipping expexted numbers.
                 (_, Num(_)) => {
                     println!("Skipping expected number");
                     expected.next();
@@ -674,11 +696,25 @@ fn build_parsed_datetime_component(
     Ok(())
 }
 
+pub struct IntervalDatetimeParseKey {
+    pub ym: Option<DateTimeField>,
+    pub d: Option<DateTimeField>,
+    pub hms: Option<DateTimeField>,
+}
+
+impl Default for IntervalDatetimeParseKey {
+    fn default() -> IntervalDatetimeParseKey {
+        IntervalDatetimeParseKey {
+            ym: None,
+            d: None,
+            hms: None,
+        }
+    }
+}
+
 pub(crate) fn build_parsed_datetime_shorthand(
     tokens: &[IntervalToken],
-    leading_field_ym: Option<&DateTimeField>,
-    leading_field_d: Option<&DateTimeField>,
-    leading_field_hms: Option<&DateTimeField>,
+    key: IntervalDatetimeParseKey,
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
     let mut actual = tokens.iter().peekable();
@@ -687,16 +723,16 @@ pub(crate) fn build_parsed_datetime_shorthand(
         ..Default::default()
     };
 
-    if let Some(leading_field_ym) = leading_field_ym {
-        build_parsed_datetime_component(&mut actual, *leading_field_ym, value, &mut pdt)?;
+    if let Some(leading_field_ym) = key.ym {
+        build_parsed_datetime_component(&mut actual, leading_field_ym, value, &mut pdt)?;
     }
 
-    if let Some(leading_field_d) = leading_field_d {
-        build_parsed_datetime_component(&mut actual, *leading_field_d, value, &mut pdt)?;
+    if let Some(leading_field_d) = key.d {
+        build_parsed_datetime_component(&mut actual, leading_field_d, value, &mut pdt)?;
     }
 
-    if let Some(leading_field_dhms) = leading_field_hms {
-        build_parsed_datetime_component(&mut actual, *leading_field_dhms, value, &mut pdt)?;
+    if let Some(leading_field_dhms) = key.hms {
+        build_parsed_datetime_component(&mut actual, leading_field_dhms, value, &mut pdt)?;
     }
 
     Ok(pdt)
@@ -705,6 +741,7 @@ pub(crate) fn build_parsed_datetime_shorthand(
 use std::collections::VecDeque;
 
 pub(crate) fn build_parsed_datetime_from_datetime_str(
+    tokens: &[IntervalToken],
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
     use DateTimeField::*;
@@ -721,8 +758,7 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
 
     let mut expected_i = 0;
 
-    let t = tokenize_interval(value)?;
-    let mut actual = t.iter().peekable();
+    let mut actual = tokens.iter().peekable();
 
     let mut is_negative = 1;
     let mut seen_int = false;

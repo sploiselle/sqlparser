@@ -518,13 +518,13 @@ impl Parser {
         use std::convert::TryInto;
 
         let value = self.parse_literal_string()?;
-        let pdt = Self::parse_interval_string(
-            &value,
-            Some(DateTimeField::Year),
-            Some(DateTimeField::Day),
-            Some(DateTimeField::Hour),
-            None,
-        )?;
+
+        let key = datetime::IntervalDatetimeParseKey {
+            ym: Some(DateTimeField::Year),
+            d: Some(DateTimeField::Day),
+            hms: Some(DateTimeField::Hour),
+        };
+        let pdt = Self::parse_interval_string(&value, key, None)?;
 
         match (pdt.year, pdt.month, pdt.day, pdt.hour) {
             (Some(year), Some(month), Some(day), None) => {
@@ -700,7 +700,6 @@ impl Parser {
 
         let raw_value = self.parse_literal_string()?;
 
-        let mut leading_precision = None;
         let mut fsec_precision = None;
         let precision_high;
         let precision_low;
@@ -717,9 +716,17 @@ impl Parser {
                         "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS",
                         "DAYS", "HOURS", "MINUTES", "SECONDS",
                     ])?;
+
+                    if d == "SECOND" || d == "SECONDS" {
+                        fsec_precision = self.parse_optional_precision()?;
+                    }
+
                     precision_high = self.parse_date_time_field_given_str(d)?;
                     precision_low = self.parse_date_time_field_given_str(e)?;
                 } else {
+                    if d == "SECOND" || d == "SECONDS" {
+                        fsec_precision = self.parse_optional_precision()?;
+                    }
                     precision_high = DateTimeField::Year;
                     precision_low = self.parse_date_time_field_given_str(d)?
                 }
@@ -732,9 +739,9 @@ impl Parser {
         // If the ranges would not allow range to be expressed (e.g. `MINUTES TO MONTH`),
         // return an error.
         // Counter-intuitively greater enums have lower values.
-        if precision_high > precision_low {
+        if precision_high >= precision_low {
             return parser_err!(
-                "Invalid field range in INTERVAL '{}' {} TO {};  {} is greater than {}",
+                "Invalid field range in INTERVAL '{}' {} TO {};  {} is >= {}",
                 raw_value,
                 precision_low,
                 precision_high,
@@ -746,14 +753,19 @@ impl Parser {
         // Determine the actual date-time values contained in `raw_value`. This should be done
         // after determining the range of valid time in the case where `raw_value` is ambiguous,
         // in which case the end_range value annotates the expected time_unit.
-        let pdt = Self::parse_interval_string(&raw_value, None, None, None, Some(precision_low))?;
+        let pdt = Self::parse_interval_string(
+            &raw_value,
+            datetime::IntervalDatetimeParseKey {
+                ..Default::default()
+            },
+            Some(precision_low),
+        )?;
 
         Ok(Expr::Value(Value::Interval(IntervalValue {
             value: raw_value,
             parsed: pdt,
             precision_high,
             precision_low,
-            leading_precision,
             fractional_seconds_precision: fsec_precision,
         })))
     }
@@ -892,9 +904,7 @@ impl Parser {
     /// ```
     pub fn parse_interval_string(
         value: &str,
-        leading_field_ym: Option<DateTimeField>,
-        leading_field_d: Option<DateTimeField>,
-        leading_field_hms: Option<DateTimeField>,
+        key: datetime::IntervalDatetimeParseKey,
         ambiguous_resolver: Option<DateTimeField>,
     ) -> Result<ParsedDateTime, ParserError> {
         use DateTimeField::*;
@@ -903,39 +913,20 @@ impl Parser {
                 "Interval date string is empty!".to_string(),
             ));
         }
-        let (leading_field_ym, leading_field_d, leading_field_hms) =
-            match (leading_field_ym, leading_field_d, leading_field_hms) {
-                (None, None, None) => {
-                    if Self::contains_date_time_str(value)? {
-                        return datetime::build_parsed_datetime_from_datetime_str(value);
-                    } else {
-                        match datetime::determine_interval_parse_heads(value)? {
-                            (None, None, None) => match ambiguous_resolver {
-                                Some(Year) | Some(Month) => (ambiguous_resolver, None, None),
-                                Some(Day) => (None, ambiguous_resolver, None),
-                                Some(_) => (None, None, ambiguous_resolver),
-                                None => {
-                                    return parser_err!(
-                                    "Cannot parse interval string {}; value is amibugous and no \
-                                     ambiguity resolver provided to parse_interval_string",
-                                    value
-                                )
-                                }
-                            },
-                            (ym, d, hms) => (ym, d, hms),
-                        }
-                    }
-                }
-                (ym, d, hms) => (ym, d, hms),
-            };
+
+        let mut key = key;
+
         let toks = datetime::tokenize_interval(value)?;
-        datetime::build_parsed_datetime_shorthand(
-            &toks,
-            leading_field_ym.as_ref(),
-            leading_field_d.as_ref(),
-            leading_field_hms.as_ref(),
-            value,
-        )
+
+        if Self::contains_date_time_str(value)? {
+            return datetime::build_parsed_datetime_from_datetime_str(&toks, value);
+        }
+
+        if let (None, None, None) = (key.ym, key.d, key.hms) {
+            key = datetime::determine_interval_parse_heads(value, ambiguous_resolver)?;
+        };
+
+        datetime::build_parsed_datetime_shorthand(&toks, key, value)
     }
 
     pub fn parse_timestamp_string(
@@ -950,13 +941,13 @@ impl Parser {
 
         let (ts_string, tz_string) = datetime::split_timestamp_string(value);
 
-        let mut pdt = Self::parse_interval_string(
-            ts_string,
-            Some(DateTimeField::Year),
-            None,
-            Some(DateTimeField::Hour),
-            None,
-        )?;
+        let parse_key = datetime::IntervalDatetimeParseKey {
+            ym: Some(DateTimeField::Year),
+            hms: Some(DateTimeField::Hour),
+            ..Default::default()
+        };
+
+        let mut pdt = Self::parse_interval_string(ts_string, parse_key, None)?;
         if !parse_timezone || tz_string.is_empty() {
             return Ok(pdt);
         }

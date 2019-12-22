@@ -9,15 +9,6 @@ pub struct IntervalValue {
     pub value: String,
     /// the fully parsed date time
     pub parsed: ParsedDateTime,
-    /// The unit of the first field in the interval. `INTERVAL 'T' MINUTE`
-    /// means `T` is in minutes
-    /// How many digits the leading field is allowed to occupy.
-    ///
-    /// The interval `INTERVAL '1234' MINUTE(3)` is **illegal**, but `INTERVAL
-    /// '123' MINUTE(3)` is fine.
-    ///
-    /// This parser does not do any validation that fields fit.
-    pub leading_precision: Option<u64>,
     /// How much precision to keep track of
     ///
     /// If this is ommitted, then you are supposed to ignore all of the
@@ -50,7 +41,6 @@ impl Default for IntervalValue {
             parsed: ParsedDateTime::default(),
             precision_high: DateTimeField::Year,
             precision_low: DateTimeField::Second,
-            leading_precision: None,
             fractional_seconds_precision: None,
         }
     }
@@ -105,7 +95,32 @@ impl IntervalValue {
 
         if self.precision_high == Second || *min_field == Second {
             if let Some(n) = self.parsed.nano {
-                nanos += n;
+                let mut precision = 6;
+                let mut remainder = 0;
+                if let Some(p) = self.fractional_seconds_precision {
+                    precision = p;
+                }
+
+                if precision > 6 {
+                    return Err(ValueError(format!(
+                        "Precision of nanoseconds must be (0, 6), have {}",
+                        precision
+                    )));
+                }
+                remainder = n % 10_i64.pow(9 - precision as u32);
+                println!("{} remainder pre", remainder);
+
+                println!(
+                    "Rounding consideration {}",
+                    remainder / 10_i64.pow(8 - precision as u32)
+                );
+
+                if remainder / 10_i64.pow(8 - precision as u32) > 4 {
+                    nanos += 10_i64.pow(9 - precision as u32);
+                }
+                println!("{} remainder post", remainder);
+
+                nanos += n - remainder;
             }
         }
 

@@ -95,13 +95,11 @@ impl fmt::Display for Value {
                 value,
                 precision_high,
                 precision_low,
-                leading_precision: Some(leading_precision),
                 fractional_seconds_precision: Some(fractional_seconds_precision),
             }) => write!(
                 f,
-                "INTERVAL '{}' SECOND ({}, {})",
+                "INTERVAL '{}' SECOND ({})",
                 escape_single_quote_string(value),
-                leading_precision,
                 fractional_seconds_precision
             ),
             Value::Interval(IntervalValue {
@@ -109,7 +107,6 @@ impl fmt::Display for Value {
                 value,
                 precision_high,
                 precision_low,
-                leading_precision,
                 fractional_seconds_precision,
             }) => {
                 write!(
@@ -118,9 +115,6 @@ impl fmt::Display for Value {
                     escape_single_quote_string(value),
                     precision_high
                 )?;
-                if let Some(leading_precision) = leading_precision {
-                    write!(f, " ({})", leading_precision)?;
-                }
                 write!(f, " TO {}", precision_low)?;
 
                 if let Some(fractional_seconds_precision) = fractional_seconds_precision {
