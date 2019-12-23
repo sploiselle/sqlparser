@@ -519,7 +519,7 @@ impl Parser {
 
         let value = self.parse_literal_string()?;
 
-        let key = datetime::IntervalDatetimeParseKey {
+        let key = datetime::IntervalShorthandParseKey {
             ym: Some(DateTimeField::Year),
             d: Some(DateTimeField::Day),
             hms: Some(DateTimeField::Hour),
@@ -684,29 +684,17 @@ impl Parser {
     ///   1. `INTERVAL '1' DAY`
     ///   2. `INTERVAL '1-1' YEAR TO MONTH`
     ///   3. `INTERVAL '1' SECOND`
-    ///   4. `INTERVAL '1:1:1.1' HOUR (5) TO SECOND (5)`
-    ///   5. `INTERVAL '1.1' SECOND (2, 2)`
-    ///   6. `INTERVAL '1:1' HOUR (5) TO MINUTE (5)`
+    ///   4. `INTERVAL '1:1:1.1' HOUR TO SECOND (5)`
+    ///   5. `INTERVAL '1.1' SECOND (2)`
     ///
     pub fn parse_literal_interval(&mut self) -> Result<Expr, ParserError> {
-        use DateTimeField::*;
-        // The SQL standard allows an optional sign before the raw_value string, but
-        // it is not clear if any implementations support that syntax, so we
-        // don't currently try to parse it. (The sign can instead be included
-        // inside the raw_value string.)
-
         // The first token in an interval is a string literal which specifies
         // the duration of the interval.
-
         let raw_value = self.parse_literal_string()?;
 
-        let mut fsec_precision = None;
-        let precision_high;
-        let precision_low;
-
-        // Determine range of valid time units to use, whether explicit (`INTERVAL ... DAY TO MINUTE`) or
+        // Determine the range of TimeUnits , whether explicit (`INTERVAL ... DAY TO MINUTE`) or
         // implicit (in which all date fields are eligible).
-        match self.expect_one_of_keywords(&[
+        let (precision_high, precision_low, precision_fsec) = match self.expect_one_of_keywords(&[
             "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS", "DAYS", "HOURS",
             "MINUTES", "SECONDS",
         ]) {
@@ -716,29 +704,37 @@ impl Parser {
                         "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "YEARS", "MONTHS",
                         "DAYS", "HOURS", "MINUTES", "SECONDS",
                     ])?;
+                    let precision_fsec = if d == "SECOND" || d == "SECONDS" {
+                        self.parse_optional_precision()?
+                    } else {
+                        None
+                    };
 
-                    if d == "SECOND" || d == "SECONDS" {
-                        fsec_precision = self.parse_optional_precision()?;
-                    }
-
-                    precision_high = self.parse_date_time_field_given_str(d)?;
-                    precision_low = self.parse_date_time_field_given_str(e)?;
+                    (
+                        self.parse_date_time_field_given_str(d)?,
+                        self.parse_date_time_field_given_str(e)?,
+                        precision_fsec,
+                    )
                 } else {
-                    if d == "SECOND" || d == "SECONDS" {
-                        fsec_precision = self.parse_optional_precision()?;
-                    }
-                    precision_high = DateTimeField::Year;
-                    precision_low = self.parse_date_time_field_given_str(d)?
+                    let precision_fsec = if d == "SECOND" || d == "SECONDS" {
+                        self.parse_optional_precision()?
+                    } else {
+                        None
+                    };
+
+                    (
+                        DateTimeField::Year,
+                        self.parse_date_time_field_given_str(d)?,
+                        precision_fsec,
+                    )
                 }
             }
-            Err(_) => {
-                precision_high = DateTimeField::Year;
-                precision_low = DateTimeField::Second;
-            }
+            Err(_) => (DateTimeField::Year, DateTimeField::Second, None),
         };
-        // If the ranges would not allow range to be expressed (e.g. `MINUTES TO MONTH`),
-        // return an error.
-        // Counter-intuitively greater enums have lower values.
+        // Check for invalid ranges, i.e.
+        // - precision_high is a smaller TimeUnit than precision_low.
+        // - precision_high equals precision_low. This case is semantically rational,
+        //   but is not supported by Postgres.
         if precision_high >= precision_low {
             return parser_err!(
                 "Invalid field range in INTERVAL '{}' {} TO {};  {} is >= {}",
@@ -750,12 +746,13 @@ impl Parser {
             );
         }
 
-        // Determine the actual date-time values contained in `raw_value`. This should be done
-        // after determining the range of valid time in the case where `raw_value` is ambiguous,
-        // in which case the end_range value annotates the expected time_unit.
+        // Determine the date-time values expressed in `raw_value`. This should be done
+        // after determining the TimeUnit range so you can use `precision_low` in cases
+        // where `raw_value` is ambiguous (e.g. `INTERVAL '1'`) to annotate the desired
+        // TimeUnit (e.g. `INTERVAL '1' HOUR`).
         let pdt = Self::parse_interval_string(
             &raw_value,
-            datetime::IntervalDatetimeParseKey {
+            datetime::IntervalShorthandParseKey {
                 ..Default::default()
             },
             Some(precision_low),
@@ -766,7 +763,7 @@ impl Parser {
             parsed: pdt,
             precision_high,
             precision_low,
-            fractional_seconds_precision: fsec_precision,
+            fractional_seconds_precision: precision_fsec,
         })))
     }
 
@@ -904,17 +901,14 @@ impl Parser {
     /// ```
     pub fn parse_interval_string(
         value: &str,
-        key: datetime::IntervalDatetimeParseKey,
+        key: datetime::IntervalShorthandParseKey,
         ambiguous_resolver: Option<DateTimeField>,
     ) -> Result<ParsedDateTime, ParserError> {
-        use DateTimeField::*;
         if value.is_empty() {
             return Err(ParserError::ParserError(
                 "Interval date string is empty!".to_string(),
             ));
         }
-
-        let mut key = key;
 
         let toks = datetime::tokenize_interval(value)?;
 
@@ -922,6 +916,9 @@ impl Parser {
             return datetime::build_parsed_datetime_from_datetime_str(&toks, value);
         }
 
+        let mut key = key;
+
+        // If key has None values for all fields in its key, fill in its fields.
         if let (None, None, None) = (key.ym, key.d, key.hms) {
             key = datetime::determine_interval_parse_heads(value, ambiguous_resolver)?;
         };
@@ -941,7 +938,7 @@ impl Parser {
 
         let (ts_string, tz_string) = datetime::split_timestamp_string(value);
 
-        let parse_key = datetime::IntervalDatetimeParseKey {
+        let parse_key = datetime::IntervalShorthandParseKey {
             ym: Some(DateTimeField::Year),
             hms: Some(DateTimeField::Hour),
             ..Default::default()

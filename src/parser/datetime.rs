@@ -30,7 +30,7 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
                     toks.push(parse_num(&num_buf, i)?);
                     num_buf.clear();
                 } else if !char_buf.is_empty() {
-                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
                     char_buf.clear();
                 }
                 toks.push(IntervalToken::Dash);
@@ -40,7 +40,7 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
                     toks.push(parse_num(&num_buf, i)?);
                     num_buf.clear();
                 } else if !char_buf.is_empty() {
-                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
                     char_buf.clear();
                 }
                 toks.push(IntervalToken::Space);
@@ -50,7 +50,7 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
                     toks.push(parse_num(&num_buf, i)?);
                     num_buf.clear();
                 } else if !char_buf.is_empty() {
-                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
                     char_buf.clear();
                 }
                 toks.push(IntervalToken::Colon);
@@ -60,7 +60,7 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
                     toks.push(parse_num(&num_buf, i)?);
                     num_buf.clear();
                 } else if !char_buf.is_empty() {
-                    toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+                    toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
                     char_buf.clear();
                 }
                 toks.push(IntervalToken::Dot);
@@ -68,19 +68,15 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
             }
             chr if chr.is_digit(10) => {
                 if !char_buf.is_empty() {
-                    return Err(ParserError::TokenizerError(format!(
-                        "Invalid character at offset {} in {}: {:?}",
-                        i, value, chr
-                    )));
+                    toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
+                    char_buf.clear();
                 }
                 num_buf.push(chr)
             }
             chr if chr.is_ascii_alphabetic() => {
                 if !num_buf.is_empty() {
-                    return Err(ParserError::TokenizerError(format!(
-                        "Invalid character at offset {} in {}: {:?}",
-                        i, value, chr
-                    )));
+                    toks.push(parse_num(&num_buf, i)?);
+                    num_buf.clear();
                 }
                 char_buf.push(chr)
             }
@@ -109,7 +105,7 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
             toks.push(IntervalToken::Nanos(raw * multiplicand));
         }
     } else if !char_buf.is_empty() {
-        toks.push(IntervalToken::TimeUnit(char_buf.clone()));
+        toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
     }
     Ok(toks)
 }
@@ -204,27 +200,36 @@ fn tokenize_timezone(value: &str) -> Result<Vec<IntervalToken>, ParserError> {
     Ok(toks)
 }
 
-// determine_interval_parse_heads determines the "head" value of `interval_str`, i.e. where we should
-// begin parsing using potential_interval_tokens_ym and potential_interval_tokens_dhms. It also tracks
-// cases where `interval_str` is ambiguous and can be "moved" by the range declaration, e.g.
-// `INTERVAL '1' MINUTE`.
-//
-// Why do we parse in this way?
-//
-// Interval shorthand uses the following format:
-// Y-M D H:M:S.NS
-//
-// However, Postgres does not treat interval strings as expressing any continuous range, e.g.
-// `INTERVAL '1-2 3` represents `1 year 2 mons 00:00:03`. To handle this, we treat interval strings
-// as having three components:
+// IntervalShorthandParseKey expresses the greatest value present in each "section" of an interval string
+// expressed in shorthand, e.g. `INTERVAL '1-2 3 4:5:6.7', which corresponds to the following format:
 // {Y-M }{D }{H:M:S.NS}
 //
-// Throughout interval parsing, these elements are referred to with a suffix of _ym for the former
-// and _dhms for the latter.
+// This structuring is necessary because Postgres does not necessarily treat interval strings as expressing
+// continuous range, e.g. `INTERVAL '1-2 3` represents `1 year 2 mons 00:00:03`.
+pub struct IntervalShorthandParseKey {
+    pub ym: Option<DateTimeField>,
+    pub d: Option<DateTimeField>,
+    pub hms: Option<DateTimeField>,
+}
+
+impl Default for IntervalShorthandParseKey {
+    fn default() -> IntervalShorthandParseKey {
+        IntervalShorthandParseKey {
+            ym: None,
+            d: None,
+            hms: None,
+        }
+    }
+}
+
+// determine_interval_parse_heads determines the "head" value of `interval_str`, i.e. the greatest
+// value expressed in each "section" of the interval shorthand string.
 pub(crate) fn determine_interval_parse_heads(
     interval_str: &str,
     ambiguous_resolver: Option<DateTimeField>,
-) -> Result<IntervalDatetimeParseKey, ParserError> {
+) -> Result<IntervalShorthandParseKey, ParserError> {
+    // Determining the {H:M:S.NS} portion of the string is always the same, so
+    // this subroutine is useful in all conditions where you need to determine it.
     let lead_hms_determ = |s: &str| -> Result<Option<DateTimeField>, ParserError> {
         let mut z = s.chars().peekable();
 
@@ -236,7 +241,7 @@ pub(crate) fn determine_interval_parse_heads(
         }
 
         match z.next() {
-            // {?:...}
+            // Implies {?:...}
             Some(':') => {
                 while let Some('0'..='9') = z.peek() {
                     z.next();
@@ -272,7 +277,7 @@ pub(crate) fn determine_interval_parse_heads(
 
     match v.len() {
         // Implies {Y... }{D }{...}
-        3 => Ok(IntervalDatetimeParseKey {
+        3 => Ok(IntervalShorthandParseKey {
             ym: Some(DateTimeField::Year),
             d: Some(DateTimeField::Day),
             hms: lead_hms_determ(v[2])?,
@@ -309,7 +314,7 @@ pub(crate) fn determine_interval_parse_heads(
                 }
             }
 
-            Ok(IntervalDatetimeParseKey {
+            Ok(IntervalShorthandParseKey {
                 ym: lead_ym,
                 d: lead_d,
                 hms: lead_hms_determ(v[1])?,
@@ -327,18 +332,18 @@ pub(crate) fn determine_interval_parse_heads(
 
             match z.next() {
                 // Implies {Y-...}{}{}
-                Some('-') => Ok(IntervalDatetimeParseKey {
+                Some('-') => Ok(IntervalShorthandParseKey {
                     ym: Some(DateTimeField::Year),
                     ..Default::default()
                 }),
                 // Implies {}{}{...}
-                Some(_) => Ok(IntervalDatetimeParseKey {
+                Some(_) => Ok(IntervalShorthandParseKey {
                     hms: lead_hms_determ(interval_str)?,
                     ..Default::default()
                 }),
                 // Implies {?}{?}{?}, ambiguous case.
                 None => {
-                    let mut key = IntervalDatetimeParseKey {
+                    let mut key = IntervalShorthandParseKey {
                         ..Default::default()
                     };
                     match ambiguous_resolver {
@@ -628,7 +633,7 @@ fn build_parsed_datetime_component(
                     actual.next();
                     break;
                 }
-                // Allow skipping expexted numbers.
+                // Allow skipping expected numbers.
                 (_, Num(_)) => {
                     println!("Skipping expected number");
                     expected.next();
@@ -696,25 +701,9 @@ fn build_parsed_datetime_component(
     Ok(())
 }
 
-pub struct IntervalDatetimeParseKey {
-    pub ym: Option<DateTimeField>,
-    pub d: Option<DateTimeField>,
-    pub hms: Option<DateTimeField>,
-}
-
-impl Default for IntervalDatetimeParseKey {
-    fn default() -> IntervalDatetimeParseKey {
-        IntervalDatetimeParseKey {
-            ym: None,
-            d: None,
-            hms: None,
-        }
-    }
-}
-
 pub(crate) fn build_parsed_datetime_shorthand(
     tokens: &[IntervalToken],
-    key: IntervalDatetimeParseKey,
+    key: IntervalShorthandParseKey,
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
     let mut actual = tokens.iter().peekable();
@@ -723,77 +712,63 @@ pub(crate) fn build_parsed_datetime_shorthand(
         ..Default::default()
     };
 
-    if let Some(leading_field_ym) = key.ym {
-        build_parsed_datetime_component(&mut actual, leading_field_ym, value, &mut pdt)?;
+    if let Some(ym_head) = key.ym {
+        build_parsed_datetime_component(&mut actual, ym_head, value, &mut pdt)?;
     }
 
-    if let Some(leading_field_d) = key.d {
-        build_parsed_datetime_component(&mut actual, leading_field_d, value, &mut pdt)?;
+    if let Some(d_head) = key.d {
+        build_parsed_datetime_component(&mut actual, d_head, value, &mut pdt)?;
     }
 
-    if let Some(leading_field_dhms) = key.hms {
-        build_parsed_datetime_component(&mut actual, leading_field_dhms, value, &mut pdt)?;
+    if let Some(hms_head) = key.hms {
+        build_parsed_datetime_component(&mut actual, hms_head, value, &mut pdt)?;
     }
 
     Ok(pdt)
 }
 
-use std::collections::VecDeque;
-
 pub(crate) fn build_parsed_datetime_from_datetime_str(
     tokens: &[IntervalToken],
     value: &str,
 ) -> Result<ParsedDateTime, ParserError> {
-    use DateTimeField::*;
     use IntervalToken::*;
-
-    let mut expected = VecDeque::with_capacity(7);
-    expected.push_back(Dash);
-    expected.push_back(Num(0));
-    expected.push_back(Dot);
-    expected.push_back(Nanos(0));
-    expected.push_back(Space);
-    expected.push_back(TimeUnit(String::default()));
-    expected.push_back(Space);
-
-    let mut expected_i = 0;
 
     let mut actual = tokens.iter().peekable();
 
-    let mut is_negative = 1;
-    let mut seen_int = false;
-    let mut num_buf = 0i128;
-    let mut nano_buf = 0i64;
+    let expected = vec![
+        Dash,
+        Num(0),
+        Dot,
+        Nanos(0),
+        Space,
+        TimeUnit(String::default()),
+        Space,
+    ];
+
+    // expected_i lets us skip around the values in expected.
+    let mut expected_i = 0;
+
     let mut pdt = ParsedDateTime::default();
 
-    println!(
-        "build_parsed_datetime_from_datetime_str\nactual.len() {}",
-        actual.len()
-    );
+    // Temporary variables for parsing actual.
+    let mut is_negative = 1;
+    let mut num_buf = 0i128;
+    let mut nano_buf = Some(0i64);
 
     while let Some(atok) = actual.peek() {
         if let Some(etok) = expected.get(expected_i) {
-            println!("expected_i {}", expected_i);
-            expected_i += 1;
-            expected_i %= expected.len();
             match (atok, etok) {
                 (Dash, Dash) => {
-                    println!("Matching dash");
                     actual.next();
                     is_negative = -1;
                 }
                 (_, Dash) => {}
-                (Dot, Dot) if seen_int => {
-                    println!("Matching dot");
-                    actual.next();
-                }
-                (Num(n), Num(_)) if !seen_int => {
+                (Num(n), Num(_)) => {
                     println!("Got int {}", n);
                     actual.next();
 
-                    seen_int = true;
-
                     match actual.peek() {
+                        // Skip forward to TimeUnit.
                         Some(Space) => expected_i += 2,
                         Some(Dot) => {}
                         _ => {
@@ -802,66 +777,65 @@ pub(crate) fn build_parsed_datetime_from_datetime_str(
                     }
                     num_buf = *n;
                 }
-                (Num(n), Nanos(_)) if seen_int => {
+                // Allow skipping past the first int.
+                (_, Num(_)) => {}
+                (Dot, Dot) => {
+                    actual.next();
+                }
+                (Num(n), Nanos(_)) => {
                     println!("Got nano {}", n);
                     actual.next();
+                    // Convert num to nanos.
                     let num_digit = (*n as f64).log10();
                     let multiplicand = 100_000_000 / 10_i64.pow(num_digit as u32);
 
-                    nano_buf = (*n as i64) * multiplicand;
+                    nano_buf = Some((*n as i64) * multiplicand);
                 }
-                // Allow skipping past the first int
-                (_, Num(_)) if !seen_int => {
-                    seen_int = true;
-                }
-                (Space, Space) if seen_int => {
-                    println!("Space seen_int");
+                (Space, Space) => {
                     actual.next();
-                    seen_int = false;
-                }
-                (Space, Space) if !seen_int => {
-                    println!("Space !seen_int; resetting tracking");
-                    actual.next();
-                    is_negative = 1;
-                    num_buf = 0;
-                    nano_buf = 0;
                 }
                 (TimeUnit(f), TimeUnit(_)) => {
                     println!("I think this TimeUnit is f {}", f);
                     actual.next();
 
                     match f.as_ref() {
-                        "year" | "years" if pdt.year.is_none() => {
+                        "YEAR" | "YEARS" if pdt.year.is_none() && nano_buf.is_none() => {
                             pdt.year = Some(num_buf * is_negative);
                         }
-                        "month" | "months" if pdt.month.is_none() => {
+                        "MONTH" | "MONTHS" if pdt.month.is_none() && nano_buf.is_none() => {
                             pdt.month = Some(num_buf * is_negative);
                         }
-                        "day" | "days" if pdt.day.is_none() => {
+                        "DAY" | "DAYS" if pdt.day.is_none() && nano_buf.is_none() => {
                             pdt.day = Some(num_buf * is_negative);
                         }
-                        "hour" | "hours" if pdt.hour.is_none() => {
+                        "HOUR" | "HOURS" if pdt.hour.is_none() && nano_buf.is_none() => {
                             pdt.hour = Some(num_buf * is_negative);
                         }
-                        "minute" | "minutes" if pdt.minute.is_none() => {
+                        "MINUTE" | "MINUTES" if pdt.minute.is_none() && nano_buf.is_none() => {
                             pdt.minute = Some(num_buf * is_negative);
                         }
-                        "second" | "seconds" if pdt.second.is_none() => {
+                        "SECOND" | "SECONDS" if pdt.second.is_none() => {
                             if num_buf > 0 {
                                 pdt.second = Some(num_buf * is_negative);
                             }
-                            if nano_buf > 0 {
+                            if let Some(nano_buf) = nano_buf {
                                 pdt.nano = Some(nano_buf * is_negative as i64);
                             }
                         }
                         _ => {
-                            return parser_err!("Invalid INTERVAL: {:#?}", value);
+                            return parser_err!("Invalid INTERVAL: {}", value);
                         }
                     }
+                    // Reset all temp vars.
+                    is_negative = 1;
+                    num_buf = 0;
+                    nano_buf = None;
                 }
-                (_, _) => return parser_err!("Invalid INTERVAL: {:#?}", value),
+                (_, _) => return parser_err!("Invalid INTERVAL: {}", value),
             }
         }
+        // Advance expected_i to next token with circular behavior.
+        expected_i = (expected_i + 1) % expected.len();
     }
 
     Ok(pdt)
