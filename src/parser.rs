@@ -688,6 +688,7 @@ impl Parser {
     ///   5. `INTERVAL '1.1' SECOND (2)`
     ///
     pub fn parse_literal_interval(&mut self) -> Result<Expr, ParserError> {
+        use DateTimeField::*;
         // The first token in an interval is a string literal which specifies
         // the duration of the interval.
         let raw_value = self.parse_literal_string()?;
@@ -735,7 +736,7 @@ impl Parser {
         // - precision_high is a smaller TimeUnit than precision_low.
         // - precision_high equals precision_low. This case is semantically rational,
         //   but is not supported by Postgres.
-        if precision_high >= precision_low {
+        if precision_high >= precision_low && precision_high != Year && precision_low != Second {
             return parser_err!(
                 "Invalid field range in INTERVAL '{}' {} TO {};  {} is >= {}",
                 raw_value,

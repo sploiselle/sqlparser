@@ -70,13 +70,37 @@ impl IntervalValue {
 
         let mut add_field = |d: DateTimeField| match d {
             Year => {
-                months += self.parsed.year.unwrap_or(0) as i64 * 12;
+                let (y, y_f) = self.units_of(Year);
+
+                months += y.unwrap_or(0) as i64 * 12;
+                months += y_f.unwrap_or(0) * 12 / 1_000_000_000;
             }
-            Month => months += self.parsed.month.unwrap_or(0) as i64,
-            f => {
-                if let Some(time) = self.units_of(f) {
-                    seconds += time * seconds_multiplier(f);
-                }
+            Month => {
+                let (m, m_f) = self.units_of(Month);
+
+                months += m.unwrap_or(0) as i64;
+
+                let s_n = m_f.unwrap_or(0) * 30 * seconds_multiplier(Day) as i64;
+
+                seconds += s_n as i128 / 1_000_000_000;
+
+                nanos += s_n % 1_000_000_000;
+            }
+            Second => {
+                let (s, n) = self.units_of(Second);
+                seconds += s.unwrap_or(0);
+                nanos += n.unwrap_or(0);
+            }
+            d => {
+                let (t, t_f) = self.units_of(d);
+
+                seconds += t.unwrap_or(0) * seconds_multiplier(d);
+
+                let s_n = t_f.unwrap_or(0) * (seconds_multiplier(d) as i64);
+
+                seconds += s_n as i128 / 1_000_000_000;
+
+                nanos += s_n % 1_000_000_000;
             }
         };
 
@@ -93,8 +117,18 @@ impl IntervalValue {
             add_field(field);
         }
 
-        if self.precision_high == Second || *min_field == Second {
-            if let Some(n) = self.parsed.nano {
+        match *min_field {
+            Year => {
+                months -= months % 12;
+                seconds = 0;
+                nanos = 0;
+            }
+            Month => {
+                seconds = 0;
+                nanos = 0;
+            }
+            // Round nanos
+            Second => {
                 let mut precision = 6;
                 let mut remainder = 0;
                 if let Some(p) = self.fractional_seconds_precision {
@@ -107,38 +141,49 @@ impl IntervalValue {
                         precision
                     )));
                 }
-                remainder = n % 10_i64.pow(9 - precision as u32);
+                remainder = nanos % 10_i64.pow(9 - precision as u32);
                 println!("{} remainder pre", remainder);
 
                 println!(
                     "Rounding consideration {}",
                     remainder / 10_i64.pow(8 - precision as u32)
                 );
-
+                // Check for round up.
                 if remainder / 10_i64.pow(8 - precision as u32) > 4 {
                     nanos += 10_i64.pow(9 - precision as u32);
                 }
                 println!("{} remainder post", remainder);
 
-                nanos += n - remainder;
+                nanos -= remainder;
+            }
+            dhm => {
+                println!("Rounding to {}", dhm);
+                println!("Before rounding {}", seconds);
+                seconds -= seconds % seconds_multiplier(dhm);
+                println!("After rounding {}", seconds);
+                nanos = 0;
             }
         }
 
         if nanos < 0 && seconds > 0 {
-            if let Some(n) = 1_000_000_000i64.checked_add(nanos) {
+            if let Some(n) = 1_000_000_000_i64.checked_add(nanos) {
+                println!("moving nanos to second neg");
                 nanos = n;
                 seconds -= 1;
             } else {
                 return Err(ValueError(format!("Nanos in INTERVAL overflowed")));
             }
         } else if nanos > 0 && seconds < 0 {
-            if let Some(n) = 1_000_000_000i64.checked_sub(nanos) {
+            if let Some(n) = 1_000_000_000_i64.checked_sub(nanos) {
+                println!("moving nanos to second pos");
                 nanos = -n;
                 seconds += 1;
             } else {
                 return Err(ValueError(format!("Nanos in INTERVAL overflowed")));
             }
         }
+
+        println!("final seconds {}", seconds);
 
         Ok(Interval {
             months,
@@ -148,38 +193,14 @@ impl IntervalValue {
     }
 
     /// Retrieve the number that we parsed out of the literal string for the `field`
-    fn units_of(&self, field: DateTimeField) -> Option<i128> {
+    fn units_of(&self, field: DateTimeField) -> (Option<i128>, Option<i64>) {
         match field {
-            DateTimeField::Year => self.parsed.year,
-            DateTimeField::Month => self.parsed.month,
-            DateTimeField::Day => {
-                if let Some(d) = self.parsed.day {
-                    Some(d as i128)
-                } else {
-                    None
-                }
-            }
-            DateTimeField::Hour => {
-                if let Some(h) = self.parsed.hour {
-                    Some(h as i128)
-                } else {
-                    None
-                }
-            }
-            DateTimeField::Minute => {
-                if let Some(m) = self.parsed.minute {
-                    Some(m as i128)
-                } else {
-                    None
-                }
-            }
-            DateTimeField::Second => {
-                if let Some(s) = self.parsed.second {
-                    Some(s as i128)
-                } else {
-                    None
-                }
-            }
+            DateTimeField::Year => (self.parsed.year, self.parsed.year_frac),
+            DateTimeField::Month => (self.parsed.month, self.parsed.month_frac),
+            DateTimeField::Day => (self.parsed.day, self.parsed.day_frac),
+            DateTimeField::Hour => (self.parsed.hour, self.parsed.hour_frac),
+            DateTimeField::Minute => (self.parsed.minute, self.parsed.minute_frac),
+            DateTimeField::Second => (self.parsed.second, self.parsed.nano),
         }
     }
 }
@@ -335,7 +356,9 @@ pub struct ParsedTimestamp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParsedDateTime {
     pub year: Option<i128>,
+    pub year_frac: Option<i64>,
     pub month: Option<i128>,
+    pub month_frac: Option<i64>,
     pub day: Option<i128>,
     pub day_frac: Option<i64>,
     pub hour: Option<i128>,
@@ -351,7 +374,9 @@ impl Default for ParsedDateTime {
     fn default() -> ParsedDateTime {
         ParsedDateTime {
             year: None,
+            year_frac: None,
             month: None,
+            month_frac: None,
             day: None,
             day_frac: None,
             hour: None,

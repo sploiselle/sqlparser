@@ -574,59 +574,60 @@ pub(crate) enum IntervalToken {
 fn determine_head(
     vt: &Vec<IntervalToken>,
     interval_str: &str,
-) -> Result<Option<ParseBehaviour>, ParserError> {
+) -> Result<Option<IntervalParseBehaviour>, ParserError> {
     use DateTimeField::*;
+    use IntervalParseBehaviour::*;
     use IntervalToken::*;
-    use ParseBehaviour::*;
-    let lead_hms_determ = |v: &Vec<IntervalToken>| -> Result<Option<ParseBehaviour>, ParserError> {
-        let mut z = v.iter().peekable();
-        println!("lead_hms_determ");
+    let lead_hms_determ =
+        |v: &Vec<IntervalToken>| -> Result<Option<IntervalParseBehaviour>, ParserError> {
+            let mut z = v.iter().peekable();
+            println!("lead_hms_determ");
 
-        // PostgreSQL inexplicably trims all leading colons from interval sections.
-        while let Some(Colon) = z.peek() {
-            z.next();
-        }
+            // PostgreSQL inexplicably trims all leading colons from interval sections.
+            while let Some(Colon) = z.peek() {
+                z.next();
+            }
 
-        // Consume leading negative sign from any field.
-        if let Some(Dash) = z.peek() {
-            z.next();
-        }
+            // Consume leading negative sign from any field.
+            if let Some(Dash) = z.peek() {
+                z.next();
+            }
 
-        if let Some(Num(_)) = z.peek() {
-            println!("lead_hms_determ clearing number 1");
-            z.next();
-        }
+            if let Some(Num(_)) = z.peek() {
+                println!("lead_hms_determ clearing number 1");
+                z.next();
+            }
 
-        match z.next() {
-            // Implies {?:...}
-            Some(Colon) => {
-                if let Some(Num(_)) = z.peek() {
-                    println!("lead_hms_determ clearing number 2");
-                    z.next();
-                }
-                match z.peek() {
-                    // Implies {H:M:...}
-                    Some(Colon) | None => Ok(Some(Shorthand(Hour))),
-                    // Implies {M:S.NS}
-                    Some(Dot) => Ok(Some(Shorthand(Minute))),
-                    _ => {
-                        return parser_err!(format!(
-                            "invalid input syntax for type interval: {}",
-                            interval_str
-                        ))
+            match z.next() {
+                // Implies {?:...}
+                Some(Colon) => {
+                    if let Some(Num(_)) = z.peek() {
+                        println!("lead_hms_determ clearing number 2");
+                        z.next();
+                    }
+                    match z.peek() {
+                        // Implies {H:M:...}
+                        Some(Colon) | None => Ok(Some(Shorthand(Hour))),
+                        // Implies {M:S.NS}
+                        Some(Dot) => Ok(Some(Shorthand(Minute))),
+                        _ => {
+                            return parser_err!(format!(
+                                "invalid input syntax for type interval: {}",
+                                interval_str
+                            ))
+                        }
                     }
                 }
+                // Ambiguous
+                // Some(Dot) | None => Ok(None),
+                _ => {
+                    return parser_err!(format!(
+                        "invalid input syntax for type interval: {}",
+                        interval_str
+                    ))
+                }
             }
-            // Ambiguous
-            // Some(Dot) | None => Ok(None),
-            _ => {
-                return parser_err!(format!(
-                    "invalid input syntax for type interval: {}",
-                    interval_str
-                ))
-            }
-        }
-    };
+        };
 
     let mut z = vt.iter().peekable();
 
@@ -664,13 +665,13 @@ fn determine_head(
     }
 }
 
-enum ParseBehaviour {
+enum IntervalParseBehaviour {
     Shorthand(DateTimeField),
     DateTimeStr(DateTimeField),
 }
 
 struct StrucutedTokens {
-    pub head: ParseBehaviour,
+    pub head: IntervalParseBehaviour,
     pub tokens: std::vec::Vec<IntervalToken>,
 }
 
@@ -686,10 +687,6 @@ pub(crate) fn build_parsed_datetime_from_vvt(
 
     let mut pdt = ParsedDateTime::default();
 
-    if pdt.day.is_some() {
-        println!("DAY IS SOME!!!!");
-    }
-
     let mut stv = Vec::new();
 
     while let Some(vt) = pvvt.next() {
@@ -699,11 +696,11 @@ pub(crate) fn build_parsed_datetime_from_vvt(
             if let Some(nvt) = pvvt.peek() {
                 let next_head = determine_head(&nvt, value)?;
                 head = match next_head {
-                    Some(ParseBehaviour::Shorthand(f)) => match f {
+                    Some(IntervalParseBehaviour::Shorthand(f)) => match f {
                         Year | Month | Day => None,
-                        _ => Some(ParseBehaviour::Shorthand(Day)),
+                        _ => Some(IntervalParseBehaviour::Shorthand(Day)),
                     },
-                    Some(ParseBehaviour::DateTimeStr(_)) => {
+                    Some(IntervalParseBehaviour::DateTimeStr(_)) => {
                         pvvt.next();
                         next_head
                     }
@@ -711,7 +708,9 @@ pub(crate) fn build_parsed_datetime_from_vvt(
                 }
             }
             if head.is_none() && ambiguous_resolver.is_some() {
-                head = Some(ParseBehaviour::Shorthand(ambiguous_resolver.unwrap()));
+                head = Some(IntervalParseBehaviour::DateTimeStr(
+                    ambiguous_resolver.unwrap(),
+                ));
                 ambiguous_resolver = None;
             } else if head.is_none() {
                 return parser_err!("Cannot determine type of head");
@@ -723,23 +722,15 @@ pub(crate) fn build_parsed_datetime_from_vvt(
         });
     }
 
-    if pdt.day.is_some() {
-        println!("DAY IS SOME!!!!");
-    }
-
     for st in stv {
         match st.head {
-            ParseBehaviour::Shorthand(f) => {
+            IntervalParseBehaviour::Shorthand(f) => {
                 build_parsed_datetime_component(&st.tokens, f, value, &mut pdt)?
             }
-            ParseBehaviour::DateTimeStr(f) => {
+            IntervalParseBehaviour::DateTimeStr(f) => {
                 build_parsed_datetime_from_datetime_str(&st.tokens, f, value, &mut pdt)?
             }
         }
-    }
-
-    if pdt.day.is_some() {
-        println!("DAY IS SOME!!!!");
     }
 
     if let (None, None, None, None, None, None, None) = (
@@ -758,10 +749,6 @@ fn build_parsed_datetime_component(
 ) -> Result<(), ParserError> {
     use DateTimeField::*;
     use IntervalToken::*;
-
-    if pdt.day.is_some() {
-        println!("DAY IS SOME!!!!");
-    }
 
     let mut actual = v.iter().peekable();
 
@@ -899,7 +886,7 @@ fn build_parsed_datetime_component(
     }
     println!("Exited loop in");
 
-    // If using Shorthand, do not allow any further modification.
+    // If using Shorthand, do not allow any further modification to shorthand group.
     match leading_field {
         Year | Month => {
             if pdt.year.is_none() {
@@ -947,9 +934,6 @@ fn build_parsed_datetime_from_datetime_str(
         "build_parsed_datetime_from_datetime_str time_unit {}",
         time_unit
     );
-    if pdt.day.is_some() {
-        println!("DAY IS SOME!!!!");
-    }
 
     let mut actual = tokens.iter().peekable();
 
@@ -961,7 +945,7 @@ fn build_parsed_datetime_from_datetime_str(
     // Temporary variables for parsing actual.
     let mut is_negative = 1;
     let mut num_buf = 0i128;
-    let mut nano_buf = Some(0i64);
+    let mut frac_buf = None;
 
     while let Some(atok) = actual.peek() {
         if let Some(etok) = expected.get(expected_i) {
@@ -1000,13 +984,13 @@ fn build_parsed_datetime_from_datetime_str(
                     let num_digit = (*n as f64).log10();
                     let multiplicand = 100_000_000 / 10_i64.pow(num_digit as u32);
 
-                    nano_buf = Some((*n as i64) * multiplicand);
+                    frac_buf = Some((*n as i64) * multiplicand);
                 }
                 (Nanos(n), Nanos(_)) => {
                     println!("Got nano {}", n);
                     actual.next();
 
-                    nano_buf = Some(*n);
+                    frac_buf = Some(*n);
                 }
                 (_, _) => return parser_err!("Invalid INTERVAL: while let Some(atok)  {}", value),
             }
@@ -1020,25 +1004,38 @@ fn build_parsed_datetime_from_datetime_str(
     match time_unit {
         DateTimeField::Year if pdt.year.is_none() => {
             pdt.year = Some(num_buf * is_negative);
+            if let Some(year_frac) = frac_buf {
+                pdt.year_frac = Some(year_frac * is_negative as i64);
+            }
         }
         DateTimeField::Month if pdt.month.is_none() => {
             pdt.month = Some(num_buf * is_negative);
+            if let Some(month_frac) = frac_buf {
+                pdt.month_frac = Some(month_frac * is_negative as i64);
+            }
         }
         DateTimeField::Day if pdt.day.is_none() => {
             pdt.day = Some(num_buf * is_negative);
+            if let Some(day_frac) = frac_buf {
+                pdt.day_frac = Some(day_frac * is_negative as i64);
+            }
         }
         DateTimeField::Hour if pdt.hour.is_none() => {
             pdt.hour = Some(num_buf * is_negative);
+            if let Some(hour_frac) = frac_buf {
+                pdt.hour_frac = Some(hour_frac * is_negative as i64);
+            }
         }
         DateTimeField::Minute if pdt.minute.is_none() => {
             pdt.minute = Some(num_buf * is_negative);
+            if let Some(min_frac) = frac_buf {
+                pdt.minute_frac = Some(min_frac * is_negative as i64);
+            }
         }
         DateTimeField::Second if pdt.second.is_none() => {
-            if num_buf > 0 {
-                pdt.second = Some(num_buf * is_negative);
-            }
-            if let Some(nano_buf) = nano_buf {
-                pdt.nano = Some(nano_buf * is_negative as i64);
+            pdt.second = Some(num_buf * is_negative);
+            if let Some(nanos) = frac_buf {
+                pdt.nano = Some(nanos * is_negative as i64);
             }
         }
         _ => {
