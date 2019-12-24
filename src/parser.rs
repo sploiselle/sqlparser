@@ -910,20 +910,29 @@ impl Parser {
             ));
         }
 
-        let toks = datetime::tokenize_interval(value)?;
+        let mut vvt = Vec::new();
 
-        if Self::contains_date_time_str(value)? {
-            return datetime::build_parsed_datetime_from_datetime_str(&toks, value);
+        let vs = value.trim().split_whitespace().collect::<Vec<&str>>();
+        for s in vs {
+            vvt.push(datetime::tokenize_interval(s)?);
         }
 
-        let mut key = key;
+        datetime::build_parsed_datetime_from_vvt(&vvt, value, ambiguous_resolver)
 
-        // If key has None values for all fields in its key, fill in its fields.
-        if let (None, None, None) = (key.ym, key.d, key.hms) {
-            key = datetime::determine_interval_parse_heads(value, ambiguous_resolver)?;
-        };
+        // let toks = datetime::tokenize_interval(value)?;
 
-        datetime::build_parsed_datetime_shorthand(&toks, key, value)
+        // if Self::contains_date_time_str(value)? {
+        //     return datetime::build_parsed_datetime_from_datetime_str(&toks, value);
+        // }
+
+        // let mut key = key;
+
+        // // If key has None values for all fields in its key, fill in its fields.
+        // if let (None, None, None) = (key.ym, key.d, key.hms) {
+        //     key = datetime::determine_interval_parse_heads(value, ambiguous_resolver)?;
+        // };
+
+        // datetime::build_parsed_datetime_shorthand(&toks, key, value)
     }
 
     pub fn parse_timestamp_string(
