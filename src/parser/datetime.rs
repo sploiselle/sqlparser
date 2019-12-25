@@ -404,12 +404,7 @@ fn trim_leading_colons_sign_numbers(
     Ok(())
 }
 
-/// Get the tokens that you *might* end up parsing starting with a most significant unit
-///
-/// For example, parsing `INTERVAL '9-5 4:3' MONTH` is *illegal*, but you
-/// should interpret that as `9 months 5 days 4 hours 3 minutes`. This function
-/// doesn't take any perspective on what things should be, it just teslls you
-/// what the user might have meant.
+/// Get the tokens that you *might* end up parsing starting with a most significant unit.
 fn potential_interval_tokens(from: DateTimeField) -> Vec<IntervalToken> {
     use DateTimeField::*;
     use IntervalToken::*;
@@ -555,39 +550,13 @@ pub(crate) enum IntervalToken {
     TimeUnit(String),
 }
 
-// pub(crate) fn build_parsed_datetime_shorthand(
-//     tokens: &[IntervalToken],
-//     key: IntervalShorthandParseKey,
-//     value: &str,
-// ) -> Result<ParsedDateTime, ParserError> {
-//     let mut actual = tokens.iter().peekable();
-
-//     let mut pdt = ParsedDateTime {
-//         ..Default::default()
-//     };
-
-//     if let Some(ym_head) = key.ym {
-//         build_parsed_datetime_component(&mut actual, ym_head, value, &mut pdt)?;
-//     }
-
-//     if let Some(d_head) = key.d {
-//         build_parsed_datetime_component(&mut actual, d_head, value, &mut pdt)?;
-//     }
-
-//     if let Some(hms_head) = key.hms {
-//         build_parsed_datetime_component(&mut actual, hms_head, value, &mut pdt)?;
-//     }
-
-//     Ok(pdt)
-// }
-
-enum IntervalParseBehaviour {
-    Shorthand(DateTimeField),
-    DateTimeStr(DateTimeField),
+enum IntervalPartFormat {
+    SQLStandard(DateTimeField),
+    PostgreSQL(DateTimeField),
 }
 
-struct StructuredInveralToken {
-    pub key: IntervalParseBehaviour,
+struct AnnotatedIntervalPart {
+    pub fmt: IntervalPartFormat,
     pub tokens: std::vec::Vec<IntervalToken>,
 }
 
@@ -600,118 +569,98 @@ pub(crate) fn build_parsed_datetime(
     ambiguous_resolver: Option<DateTimeField>,
 ) -> Result<ParsedDateTime, ParserError> {
     use DateTimeField::*;
-    use IntervalToken::*;
 
     // ambiguous_resolver can only be used once, so it needs to be settable to None.
     let mut ambiguous_resolver = ambiguous_resolver;
 
     let mut pdt = ParsedDateTime::default();
 
-    let mut value_vector = Vec::new();
+    let mut value_parts = Vec::new();
 
     let value_split = value.trim().split_whitespace().collect::<Vec<&str>>();
     for s in value_split {
-        value_vector.push(tokenize_interval(s)?);
+        value_parts.push(tokenize_interval(s)?);
     }
 
-    let mut value_vector = value_vector.iter().peekable();
+    let mut value_parts = value_parts.iter().peekable();
 
-    let mut structured_tokens = Vec::new();
+    let mut annotated_parts = Vec::new();
 
-    while let Some(vt) = value_vector.next() {
-        let mut key = determine_key(&vt, value)?;
+    while let Some(part) = value_parts.next() {
+        let mut fmt = determine_format_w_datetimefield(&part, value)?;
         // If cannot discern key of this element, try to infer key.
-        if key.is_none() {
-            if let Some(nvt) = value_vector.peek() {
+        if fmt.is_none() {
+            if let Some(next_part) = value_parts.peek() {
                 // Determine key of next element of value_vector.
-                let next_key = determine_key(&nvt, value)?;
-                key = match next_key {
-                    Some(IntervalParseBehaviour::Shorthand(f)) => {
+                let next_fmt = determine_format_w_datetimefield(&next_part, value)?;
+                fmt = match next_fmt {
+                    Some(IntervalPartFormat::SQLStandard(f)) => {
                         match f {
                             Year | Month | Day => None,
                             // If next key is shorthand and represents Hour, Minute, or Second
                             // you can infer that this component is Day, which is allowed
                             // to be parsed with a fractiona
-                            _ => Some(IntervalParseBehaviour::DateTimeStr(Day)),
+                            _ => Some(IntervalPartFormat::PostgreSQL(Day)),
                         }
                     }
                     // This represents cases like `INTERVAL '1 day'`. This token should be
                     // consumed and not parsed as its own entity, which gets taken care of
                     // by if let Some(nvt) = value_vector.next()
-                    Some(IntervalParseBehaviour::DateTimeStr(_)) => {
-                        value_vector.next();
-                        next_key
+                    Some(IntervalPartFormat::PostgreSQL(_)) => {
+                        value_parts.next();
+                        next_fmt
                     }
                     None => None,
                 }
             }
-            // If you could not infer key from next component, attempt to use
-            // ambiguous_resolver, which in consequence is something like DAY in
-            // INTERVAL '1' DAY.
-            if key.is_none() && ambiguous_resolver.is_some() {
-                key = Some(IntervalParseBehaviour::DateTimeStr(
-                    ambiguous_resolver.unwrap(),
-                ));
+            // If you could not infer key from next component, attempt to use ambiguous_resolver,
+            // which in consequence is something like DAY in INTERVAL '1' DAY.
+            if fmt.is_none() && ambiguous_resolver.is_some() {
+                fmt = Some(IntervalPartFormat::PostgreSQL(ambiguous_resolver.unwrap()));
                 ambiguous_resolver = None;
-            } else if key.is_none() {
+            } else if fmt.is_none() {
                 return parser_err!(
                     "Invalid INTERVAL '{}': add explicit time components, e.g. '1 day'",
                     value
                 );
             }
         }
-        structured_tokens.push(StructuredInveralToken {
-            key: key.unwrap(),
-            tokens: vt.clone(),
+        annotated_parts.push(AnnotatedIntervalPart {
+            fmt: fmt.unwrap(),
+            tokens: part.clone(),
         });
     }
 
-    for st in structured_tokens {
-        match st.key {
-            IntervalParseBehaviour::Shorthand(f) => {
-                build_parsed_datetime_from_shorthand(&st.tokens, f, value, &mut pdt)?
+    for ap in annotated_parts {
+        match ap.fmt {
+            IntervalPartFormat::SQLStandard(f) => {
+                build_parsed_datetime_sql_standard(&ap.tokens, f, value, &mut pdt)?
             }
-            IntervalParseBehaviour::DateTimeStr(f) => {
-                build_parsed_datetime_from_datetime_str(&st.tokens, f, value, &mut pdt)?
+            IntervalPartFormat::PostgreSQL(f) => {
+                build_parsed_datetime_from_datetime_str(&ap.tokens, f, value, &mut pdt)?
             }
         }
     }
 
-    if let (None, None, None, None, None, None, None) = (
-        pdt.year, pdt.month, pdt.day, pdt.hour, pdt.minute, pdt.second, pdt.nano,
-    ) {
-        return parser_err!("no valid fields in pdt");
-    }
     Ok(pdt)
 }
 
-fn determine_key(
+fn determine_format_w_datetimefield(
     vt: &Vec<IntervalToken>,
     interval_str: &str,
-) -> Result<Option<IntervalParseBehaviour>, ParserError> {
+) -> Result<Option<IntervalPartFormat>, ParserError> {
     use DateTimeField::*;
-    use IntervalParseBehaviour::*;
+    use IntervalPartFormat::*;
     use IntervalToken::*;
+
+    // Determine the leading component of the House:Minute:Second.Nano portion.
     let lead_hms_determ =
-        |v: &Vec<IntervalToken>| -> Result<Option<IntervalParseBehaviour>, ParserError> {
+        |v: &Vec<IntervalToken>| -> Result<Option<IntervalPartFormat>, ParserError> {
             let mut z = v.iter().peekable();
-            println!("lead_hms_determ");
 
-            // PostgreSQL inexplicably trims all leading colons from interval sections.
-            while let Some(Colon) = z.peek() {
-                z.next();
-            }
-
-            // Consume leading positive or negative sign from any field.
-            if let Some(Dash) = z.peek() {
-                z.next();
-            }
-            if let Some(Plus) = z.peek() {
-                z.next();
-            }
+            trim_chars_return_sign(&mut z);
 
             if let Some(Num(_)) = z.peek() {
-                println!("lead_hms_determ clearing number 1");
                 z.next();
             }
 
@@ -724,9 +673,9 @@ fn determine_key(
                     }
                     match z.peek() {
                         // Implies {H:M:...}
-                        Some(Colon) | None => Ok(Some(Shorthand(Hour))),
+                        Some(Colon) | None => Ok(Some(SQLStandard(Hour))),
                         // Implies {M:S.NS}
-                        Some(Dot) => Ok(Some(Shorthand(Minute))),
+                        Some(Dot) => Ok(Some(SQLStandard(Minute))),
                         _ => {
                             return parser_err!(format!(
                                 "invalid input syntax for type interval: {}",
@@ -735,8 +684,6 @@ fn determine_key(
                         }
                     }
                 }
-                // Ambiguous
-                // Some(Dot) | None => Ok(None),
                 _ => {
                     return parser_err!(format!(
                         "invalid input syntax for type interval: {}",
@@ -746,38 +693,27 @@ fn determine_key(
             }
         };
 
-    let datetime_str_determ = |f: &str| -> Result<Option<IntervalParseBehaviour>, ParserError> {
+    let datetime_str_determ = |f: &str| -> Result<Option<IntervalPartFormat>, ParserError> {
         match f {
-            "YEAR" | "YEARS" => Ok(Some(DateTimeStr(Year))),
-            "MONTH" | "MONTHS" => Ok(Some(DateTimeStr(Month))),
-            "DAY" | "DAYS" => Ok(Some(DateTimeStr(Day))),
-            "HOUR" | "HOURS" => Ok(Some(DateTimeStr(Hour))),
-            "MINUTE" | "MINUTES" => Ok(Some(DateTimeStr(Minute))),
-            "SECOND" | "SECONDS" => Ok(Some(DateTimeStr(Second))),
+            "YEAR" | "YEARS" => Ok(Some(PostgreSQL(Year))),
+            "MONTH" | "MONTHS" => Ok(Some(PostgreSQL(Month))),
+            "DAY" | "DAYS" => Ok(Some(PostgreSQL(Day))),
+            "HOUR" | "HOURS" => Ok(Some(PostgreSQL(Hour))),
+            "MINUTE" | "MINUTES" => Ok(Some(PostgreSQL(Minute))),
+            "SECOND" | "SECONDS" => Ok(Some(PostgreSQL(Second))),
             _ => parser_err!("invalid input syntax for type interval: {}", interval_str),
         }
     };
 
     let mut z = vt.iter().peekable();
 
-    // PostgreSQL inexplicably trims all leading colons from interval sections.
-    while let Some(Colon) = z.peek() {
-        z.next();
-    }
-
-    // Consume leading negative sign from any field.
-    if let Some(Dash) = z.peek() {
-        z.next();
-    }
-    if let Some(Plus) = z.peek() {
-        z.next();
-    }
+    trim_chars_return_sign(&mut z);
 
     match z.next() {
         Some(Num(_)) => {
             match z.next() {
                 // Implies {Y-...}{}{}
-                Some(Dash) => Ok(Some(Shorthand(Year))),
+                Some(Dash) => Ok(Some(SQLStandard(Year))),
                 // Implies {?}{?}{?}, ambiguous case.
                 Some(Dot) | None => Ok(None),
                 Some(TimeUnit(f)) => datetime_str_determ(f),
@@ -790,7 +726,7 @@ fn determine_key(
     }
 }
 
-fn build_parsed_datetime_from_shorthand(
+fn build_parsed_datetime_sql_standard(
     v: &Vec<IntervalToken>,
     leading_field: DateTimeField,
     value: &str,
@@ -906,7 +842,7 @@ fn build_parsed_datetime_from_shorthand(
     println!("Exited loop in");
 
     // Close all fields in group from further modification by
-    // build_parsed_datetime_from_shorthand or
+    // build_parsed_datetime_sql_standard or
     // build_parsed_datetime_from_datetime_str.
     match leading_field {
         Year | Month => {
@@ -956,13 +892,13 @@ fn build_parsed_datetime_from_datetime_str(
     );
 
     let mut actual = tokens.iter().peekable();
-
+    // We remove all spaces during tokenization, so TimeUnit only shows up if
+    // there is no space between the number and the TimeUnit.
     let expected = vec![Num(0), Dot, Nanos(0), TimeUnit(String::default())];
 
     // expected_i lets us skip around the values in expected.
     let mut expected_i = 0;
 
-    // Temporary variables for parsing actual.
     let mut num_buf = 0_i128;
     let mut frac_buf = 0_i64;
 
@@ -980,14 +916,14 @@ fn build_parsed_datetime_from_datetime_str(
                         Some(Dot) => {
                             println!("I see a dot up next");
                         }
-                        // Skip forward to TimeUnit.
+                        // Stop processing number.
                         None | Some(TimeUnit(_)) => break,
                         Some(_) => {
                             return parser_err!("Invalid char in interval {}", value);
                         }
                     }
                 }
-                // Allow skipping past the first int.
+                // Allow skipping the int, e.g. `INTERVAL '.27 day'`.
                 (_, Num(_)) => {}
                 (Dot, Dot) => {
                     println!("Got dot");
@@ -1134,18 +1070,12 @@ mod test {
     fn test_potential_interval_tokens() {
         use DateTimeField::*;
         use IntervalToken::*;
-        assert_eq!(
-            potential_interval_tokens(Year).unwrap(),
-            vec![Num(0), Dash, Num(0)]
-        );
+        assert_eq!(potential_interval_tokens(Year), vec![Num(0), Dash, Num(0)]);
+
+        assert_eq!(potential_interval_tokens(Day), vec![Num(0), Space,]);
 
         assert_eq!(
-            potential_interval_tokens(Day).unwrap(),
-            vec![Num(0), Space,]
-        );
-
-        assert_eq!(
-            potential_interval_tokens(Hour).unwrap(),
+            potential_interval_tokens(Hour),
             vec![Num(0), Colon, Num(0), Colon, Num(0), Dot, Nanos(0)]
         );
     }
