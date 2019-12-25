@@ -25,6 +25,16 @@ pub(crate) fn tokenize_interval(value: &str) -> Result<Vec<IntervalToken>, Parse
             )));
         }
         match chr {
+            '+' => {
+                if !num_buf.is_empty() {
+                    toks.push(parse_num(&num_buf, i)?);
+                    num_buf.clear();
+                } else if !char_buf.is_empty() {
+                    toks.push(IntervalToken::TimeUnit(char_buf.to_uppercase().clone()));
+                    char_buf.clear();
+                }
+                toks.push(IntervalToken::Plus);
+            }
             '-' => {
                 if !num_buf.is_empty() {
                     toks.push(parse_num(&num_buf, i)?);
@@ -571,7 +581,111 @@ pub(crate) enum IntervalToken {
 //     Ok(pdt)
 // }
 
-fn determine_head(
+enum IntervalParseBehaviour {
+    Shorthand(DateTimeField),
+    DateTimeStr(DateTimeField),
+}
+
+struct StructuredInveralToken {
+    pub key: IntervalParseBehaviour,
+    pub tokens: std::vec::Vec<IntervalToken>,
+}
+
+// build_parsed_datetime converts the string portion of an interval (`value`)
+// into a ParsedDateTime. You can allow the string to contain at most one
+// ambiguous reference by providing an `ambiguous_resolver` value.  For more
+// details about interval string syntax, see doc/user/sql/types/interval.md
+pub(crate) fn build_parsed_datetime(
+    value: &str,
+    ambiguous_resolver: Option<DateTimeField>,
+) -> Result<ParsedDateTime, ParserError> {
+    use DateTimeField::*;
+    use IntervalToken::*;
+
+    // ambiguous_resolver can only be used once, so it needs to be settable to None.
+    let mut ambiguous_resolver = ambiguous_resolver;
+
+    let mut pdt = ParsedDateTime::default();
+
+    let mut value_vector = Vec::new();
+
+    let value_split = value.trim().split_whitespace().collect::<Vec<&str>>();
+    for s in value_split {
+        value_vector.push(tokenize_interval(s)?);
+    }
+
+    let mut value_vector = value_vector.iter().peekable();
+
+    let mut structured_tokens = Vec::new();
+
+    while let Some(vt) = value_vector.next() {
+        let mut key = determine_key(&vt, value)?;
+        // If cannot discern key of this element, try to infer key.
+        if key.is_none() {
+            if let Some(nvt) = value_vector.peek() {
+                // Determine key of next element of value_vector.
+                let next_key = determine_key(&nvt, value)?;
+                key = match next_key {
+                    Some(IntervalParseBehaviour::Shorthand(f)) => {
+                        match f {
+                            Year | Month | Day => None,
+                            // If next key is shorthand and represents Hour, Minute, or Second
+                            // you can infer that this component is Day, which is allowed
+                            // to be parsed with a fractiona
+                            _ => Some(IntervalParseBehaviour::DateTimeStr(Day)),
+                        }
+                    }
+                    // This represents cases like `INTERVAL '1 day'`. This token should be
+                    // consumed and not parsed as its own entity, which gets taken care of
+                    // by if let Some(nvt) = value_vector.next()
+                    Some(IntervalParseBehaviour::DateTimeStr(_)) => {
+                        value_vector.next();
+                        next_key
+                    }
+                    None => None,
+                }
+            }
+            // If you could not infer key from next component, attempt to use
+            // ambiguous_resolver, which in consequence is something like DAY in
+            // INTERVAL '1' DAY.
+            if key.is_none() && ambiguous_resolver.is_some() {
+                key = Some(IntervalParseBehaviour::DateTimeStr(
+                    ambiguous_resolver.unwrap(),
+                ));
+                ambiguous_resolver = None;
+            } else if key.is_none() {
+                return parser_err!(
+                    "Invalid INTERVAL '{}': add explicit time components, e.g. '1 day'",
+                    value
+                );
+            }
+        }
+        structured_tokens.push(StructuredInveralToken {
+            key: key.unwrap(),
+            tokens: vt.clone(),
+        });
+    }
+
+    for st in structured_tokens {
+        match st.key {
+            IntervalParseBehaviour::Shorthand(f) => {
+                build_parsed_datetime_from_shorthand(&st.tokens, f, value, &mut pdt)?
+            }
+            IntervalParseBehaviour::DateTimeStr(f) => {
+                build_parsed_datetime_from_datetime_str(&st.tokens, f, value, &mut pdt)?
+            }
+        }
+    }
+
+    if let (None, None, None, None, None, None, None) = (
+        pdt.year, pdt.month, pdt.day, pdt.hour, pdt.minute, pdt.second, pdt.nano,
+    ) {
+        return parser_err!("no valid fields in pdt");
+    }
+    Ok(pdt)
+}
+
+fn determine_key(
     vt: &Vec<IntervalToken>,
     interval_str: &str,
 ) -> Result<Option<IntervalParseBehaviour>, ParserError> {
@@ -588,8 +702,11 @@ fn determine_head(
                 z.next();
             }
 
-            // Consume leading negative sign from any field.
+            // Consume leading positive or negative sign from any field.
             if let Some(Dash) = z.peek() {
+                z.next();
+            }
+            if let Some(Plus) = z.peek() {
                 z.next();
             }
 
@@ -629,6 +746,18 @@ fn determine_head(
             }
         };
 
+    let datetime_str_determ = |f: &str| -> Result<Option<IntervalParseBehaviour>, ParserError> {
+        match f {
+            "YEAR" | "YEARS" => Ok(Some(DateTimeStr(Year))),
+            "MONTH" | "MONTHS" => Ok(Some(DateTimeStr(Month))),
+            "DAY" | "DAYS" => Ok(Some(DateTimeStr(Day))),
+            "HOUR" | "HOURS" => Ok(Some(DateTimeStr(Hour))),
+            "MINUTE" | "MINUTES" => Ok(Some(DateTimeStr(Minute))),
+            "SECOND" | "SECONDS" => Ok(Some(DateTimeStr(Second))),
+            _ => parser_err!("invalid input syntax for type interval: {}", interval_str),
+        }
+    };
+
     let mut z = vt.iter().peekable();
 
     // PostgreSQL inexplicably trims all leading colons from interval sections.
@@ -640,6 +769,9 @@ fn determine_head(
     if let Some(Dash) = z.peek() {
         z.next();
     }
+    if let Some(Plus) = z.peek() {
+        z.next();
+    }
 
     match z.next() {
         Some(Num(_)) => {
@@ -648,100 +780,17 @@ fn determine_head(
                 Some(Dash) => Ok(Some(Shorthand(Year))),
                 // Implies {?}{?}{?}, ambiguous case.
                 Some(Dot) | None => Ok(None),
+                Some(TimeUnit(f)) => datetime_str_determ(f),
                 // Implies {}{}{...}
                 Some(_) => Ok(lead_hms_determ(vt)?),
             }
         }
-        Some(TimeUnit(f)) => match f.as_ref() {
-            "YEAR" | "YEARS" => Ok(Some(DateTimeStr(Year))),
-            "MONTH" | "MONTHS" => Ok(Some(DateTimeStr(Month))),
-            "DAY" | "DAYS" => Ok(Some(DateTimeStr(Day))),
-            "HOUR" | "HOURS" => Ok(Some(DateTimeStr(Hour))),
-            "MINUTE" | "MINUTES" => Ok(Some(DateTimeStr(Minute))),
-            "SECOND" | "SECONDS" => Ok(Some(DateTimeStr(Second))),
-            _ => parser_err!("invalid input syntax for type interval: {}", interval_str),
-        },
+        Some(TimeUnit(f)) => datetime_str_determ(f),
         _ => Ok(lead_hms_determ(vt)?),
     }
 }
 
-enum IntervalParseBehaviour {
-    Shorthand(DateTimeField),
-    DateTimeStr(DateTimeField),
-}
-
-struct StrucutedTokens {
-    pub head: IntervalParseBehaviour,
-    pub tokens: std::vec::Vec<IntervalToken>,
-}
-
-pub(crate) fn build_parsed_datetime_from_vvt(
-    vvt: &std::vec::Vec<std::vec::Vec<IntervalToken>>,
-    value: &str,
-    ambiguous_resolver: Option<DateTimeField>,
-) -> Result<ParsedDateTime, ParserError> {
-    use DateTimeField::*;
-    use IntervalToken::*;
-    let mut pvvt = vvt.iter().peekable();
-    let mut ambiguous_resolver = ambiguous_resolver;
-
-    let mut pdt = ParsedDateTime::default();
-
-    let mut stv = Vec::new();
-
-    while let Some(vt) = pvvt.next() {
-        let mut vt = vt.clone();
-        let mut head = determine_head(&vt, value)?;
-        if head.is_none() {
-            if let Some(nvt) = pvvt.peek() {
-                let next_head = determine_head(&nvt, value)?;
-                head = match next_head {
-                    Some(IntervalParseBehaviour::Shorthand(f)) => match f {
-                        Year | Month | Day => None,
-                        _ => Some(IntervalParseBehaviour::Shorthand(Day)),
-                    },
-                    Some(IntervalParseBehaviour::DateTimeStr(_)) => {
-                        pvvt.next();
-                        next_head
-                    }
-                    None => None,
-                }
-            }
-            if head.is_none() && ambiguous_resolver.is_some() {
-                head = Some(IntervalParseBehaviour::DateTimeStr(
-                    ambiguous_resolver.unwrap(),
-                ));
-                ambiguous_resolver = None;
-            } else if head.is_none() {
-                return parser_err!("Cannot determine type of head");
-            }
-        }
-        stv.push(StrucutedTokens {
-            head: head.unwrap(),
-            tokens: vt.clone(),
-        });
-    }
-
-    for st in stv {
-        match st.head {
-            IntervalParseBehaviour::Shorthand(f) => {
-                build_parsed_datetime_component(&st.tokens, f, value, &mut pdt)?
-            }
-            IntervalParseBehaviour::DateTimeStr(f) => {
-                build_parsed_datetime_from_datetime_str(&st.tokens, f, value, &mut pdt)?
-            }
-        }
-    }
-
-    if let (None, None, None, None, None, None, None) = (
-        pdt.year, pdt.month, pdt.day, pdt.hour, pdt.minute, pdt.second, pdt.nano,
-    ) {
-        return parser_err!("no valid fields in pdt");
-    }
-    Ok(pdt)
-}
-
-fn build_parsed_datetime_component(
+fn build_parsed_datetime_from_shorthand(
     v: &Vec<IntervalToken>,
     leading_field: DateTimeField,
     value: &str,
@@ -751,25 +800,10 @@ fn build_parsed_datetime_component(
     use IntervalToken::*;
 
     let mut actual = v.iter().peekable();
-
-    let mut sign = 1;
-
-    // PostgreSQL inexplicably trims all leading colons from interval parts.
-    while let Some(Colon) = actual.peek() {
-        actual.next();
-    }
-
-    if let Some(Dash) = actual.peek() {
-        // If preceded by '-', assume negative.
-        sign = -1;
-        actual.next();
-    }
-
     let expected = potential_interval_tokens(leading_field);
     let mut expected = expected.iter().peekable();
-    let mut seconds_seen = 0;
 
-    println!("Tokens left {}", actual.len());
+    let sign = trim_chars_return_sign(&mut actual);
 
     let mut current_field = leading_field;
 
@@ -790,47 +824,30 @@ fn build_parsed_datetime_component(
                     expected.next();
                     actual.next();
                     let val = *val;
-                    let frac;
-                    if let Some(Dot) = actual.peek() {
-                        actual.next();
-                        if let Some(Dot) = expected.peek() {
-                            expected.next();
-                        }
-                        if let Some(Num(f)) = actual.peek() {
-                            frac = Some((*f * sign) as i64);
-                        } else {
-                            frac = None;
-                        }
-                    } else {
-                        frac = None;
-                    }
                     match current_field {
-                        DateTimeField::Year if pdt.year.is_none() => {
-                            pdt.year = Some((val * sign) as i128)
+                        Year if pdt.year.is_none() => {
+                            pdt.year = Some(val * sign);
                         }
-                        DateTimeField::Month if pdt.month.is_none() => {
-                            pdt.month = Some((val * sign) as i128)
+                        Month if pdt.month.is_none() => {
+                            pdt.month = Some(val * sign);
                         }
-                        DateTimeField::Day if pdt.day.is_none() => {
+                        Day if pdt.day.is_none() => {
                             pdt.day = Some(val * sign);
-                            pdt.day_frac = frac;
                         }
-                        DateTimeField::Hour if pdt.hour.is_none() => {
+                        Hour if pdt.hour.is_none() => {
                             pdt.hour = Some(val * sign);
-                            pdt.hour_frac = frac;
                         }
-                        DateTimeField::Minute if pdt.minute.is_none() => {
+                        Minute if pdt.minute.is_none() => {
                             pdt.minute = Some(val * sign);
-                            pdt.minute_frac = frac;
                         }
-                        DateTimeField::Second if pdt.second.is_none() => {
+                        Second if pdt.second.is_none() => {
                             pdt.second = Some(val * sign);
                         }
                         _ => {
                             return parser_err!(
-                                "Invalid interval field {} in {}",
+                                "Invalid INTERVAL '{}'; {} field set twice.",
+                                val,
                                 current_field,
-                                val
                             );
                         }
                     }
@@ -846,13 +863,14 @@ fn build_parsed_datetime_component(
                 (Nanos(val), Nanos(_)) => {
                     expected.next();
                     actual.next();
-                    pdt.nano = Some(*val * (sign as i64))
-                }
-                // Break out of this component if you encounter a space.
-                (Space, _) => {
-                    println!("Exit early");
-                    actual.next();
-                    break;
+                    if pdt.nano.is_none() {
+                        pdt.nano = Some(*val * (sign as i64))
+                    } else {
+                        return parser_err!(
+                            "Invalid INTERVAL '{}'; NANOSECONDS field set twice.",
+                            val
+                        );
+                    }
                 }
                 // Allow skipping expected numbers.
                 (_, Num(_)) => {
@@ -870,12 +888,13 @@ fn build_parsed_datetime_component(
                 }
                 (provided, expected) => {
                     return parser_err!(
-                        "Invalid interval part at offset {}: '{}' provided {:?} but expected {:?}",
-                        i,
-                        value,
-                        provided,
-                        expected,
-                    )
+                    "Invalid interval part at offset {} ({}): '{}' provided {:?} but expected {:?}",
+                    i,
+                    leading_field,
+                    value,
+                    provided,
+                    expected,
+                )
                 }
             }
         } else {
@@ -886,7 +905,9 @@ fn build_parsed_datetime_component(
     }
     println!("Exited loop in");
 
-    // If using Shorthand, do not allow any further modification to shorthand group.
+    // Close all fields in group from further modification by
+    // build_parsed_datetime_from_shorthand or
+    // build_parsed_datetime_from_datetime_str.
     match leading_field {
         Year | Month => {
             if pdt.year.is_none() {
@@ -897,7 +918,6 @@ fn build_parsed_datetime_component(
             }
         }
         Day => {
-            println!("Filling day");
             if pdt.day.is_none() {
                 pdt.day = Some(0);
             }
@@ -937,24 +957,20 @@ fn build_parsed_datetime_from_datetime_str(
 
     let mut actual = tokens.iter().peekable();
 
-    let expected = vec![Dash, Num(0), Dot, Nanos(0)];
+    let expected = vec![Num(0), Dot, Nanos(0), TimeUnit(String::default())];
 
     // expected_i lets us skip around the values in expected.
     let mut expected_i = 0;
 
     // Temporary variables for parsing actual.
-    let mut is_negative = 1;
-    let mut num_buf = 0i128;
-    let mut frac_buf = None;
+    let mut num_buf = 0_i128;
+    let mut frac_buf = 0_i64;
+
+    let sign = trim_chars_return_sign(&mut actual);
 
     while let Some(atok) = actual.peek() {
         if let Some(etok) = expected.get(expected_i) {
             match (atok, etok) {
-                (Dash, Dash) => {
-                    actual.next();
-                    is_negative = -1;
-                }
-                (_, Dash) => {}
                 (Num(n), Num(_)) => {
                     println!("Got int {}", n);
                     actual.next();
@@ -965,7 +981,7 @@ fn build_parsed_datetime_from_datetime_str(
                             println!("I see a dot up next");
                         }
                         // Skip forward to TimeUnit.
-                        None => break,
+                        None | Some(TimeUnit(_)) => break,
                         Some(_) => {
                             return parser_err!("Invalid char in interval {}", value);
                         }
@@ -984,13 +1000,13 @@ fn build_parsed_datetime_from_datetime_str(
                     let num_digit = (*n as f64).log10();
                     let multiplicand = 100_000_000 / 10_i64.pow(num_digit as u32);
 
-                    frac_buf = Some((*n as i64) * multiplicand);
+                    frac_buf = (*n as i64) * multiplicand;
                 }
                 (Nanos(n), Nanos(_)) => {
                     println!("Got nano {}", n);
                     actual.next();
 
-                    frac_buf = Some(*n);
+                    frac_buf = *n;
                 }
                 (_, _) => return parser_err!("Invalid INTERVAL: while let Some(atok)  {}", value),
             }
@@ -1003,47 +1019,61 @@ fn build_parsed_datetime_from_datetime_str(
 
     match time_unit {
         DateTimeField::Year if pdt.year.is_none() => {
-            pdt.year = Some(num_buf * is_negative);
-            if let Some(year_frac) = frac_buf {
-                pdt.year_frac = Some(year_frac * is_negative as i64);
-            }
+            pdt.year = Some(num_buf * sign);
+            pdt.year_frac = Some(frac_buf * sign as i64);
         }
         DateTimeField::Month if pdt.month.is_none() => {
-            pdt.month = Some(num_buf * is_negative);
-            if let Some(month_frac) = frac_buf {
-                pdt.month_frac = Some(month_frac * is_negative as i64);
-            }
+            pdt.month = Some(num_buf * sign);
+            pdt.month_frac = Some(frac_buf * sign as i64);
         }
         DateTimeField::Day if pdt.day.is_none() => {
-            pdt.day = Some(num_buf * is_negative);
-            if let Some(day_frac) = frac_buf {
-                pdt.day_frac = Some(day_frac * is_negative as i64);
-            }
+            pdt.day = Some(num_buf * sign);
+            pdt.day_frac = Some(frac_buf * sign as i64);
         }
         DateTimeField::Hour if pdt.hour.is_none() => {
-            pdt.hour = Some(num_buf * is_negative);
-            if let Some(hour_frac) = frac_buf {
-                pdt.hour_frac = Some(hour_frac * is_negative as i64);
-            }
+            pdt.hour = Some(num_buf * sign);
+            pdt.hour_frac = Some(frac_buf * sign as i64);
         }
         DateTimeField::Minute if pdt.minute.is_none() => {
-            pdt.minute = Some(num_buf * is_negative);
-            if let Some(min_frac) = frac_buf {
-                pdt.minute_frac = Some(min_frac * is_negative as i64);
-            }
+            pdt.minute = Some(num_buf * sign);
+            pdt.minute_frac = Some(frac_buf * sign as i64);
         }
         DateTimeField::Second if pdt.second.is_none() => {
-            pdt.second = Some(num_buf * is_negative);
-            if let Some(nanos) = frac_buf {
-                pdt.nano = Some(nanos * is_negative as i64);
-            }
+            pdt.second = Some(num_buf * sign);
+            pdt.nano = Some(frac_buf * sign as i64);
         }
         _ => {
-            return parser_err!("Invalid INTERVAL: {}", value);
+            return parser_err!(
+                "Invalid INTERVAL '{}'; {} field set twice.",
+                value,
+                time_unit
+            );
         }
     }
 
     Ok(())
+}
+
+fn trim_chars_return_sign(
+    z: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
+) -> i128 {
+    use IntervalToken::*;
+    // PostgreSQL inexplicably trims all leading colons from interval parts.
+    while let Some(Colon) = z.peek() {
+        z.next();
+    }
+
+    if let Some(Plus) = z.peek() {
+        z.next();
+        return 1;
+    }
+
+    if let Some(Dash) = z.peek() {
+        z.next();
+        -1
+    } else {
+        1
+    }
 }
 
 /// Takes a 'date timezone' 'date time timezone' string and splits

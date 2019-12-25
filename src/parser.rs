@@ -518,13 +518,7 @@ impl Parser {
         use std::convert::TryInto;
 
         let value = self.parse_literal_string()?;
-
-        let key = datetime::IntervalShorthandParseKey {
-            ym: Some(DateTimeField::Year),
-            d: Some(DateTimeField::Day),
-            hms: Some(DateTimeField::Hour),
-        };
-        let pdt = Self::parse_interval_string(&value, key, None)?;
+        let pdt = Self::parse_interval_string(&value, None)?;
 
         match (pdt.year, pdt.month, pdt.day, pdt.hour) {
             (Some(year), Some(month), Some(day), None) => {
@@ -751,13 +745,7 @@ impl Parser {
         // after determining the TimeUnit range so you can use `precision_low` in cases
         // where `raw_value` is ambiguous (e.g. `INTERVAL '1'`) to annotate the desired
         // TimeUnit (e.g. `INTERVAL '1' HOUR`).
-        let pdt = Self::parse_interval_string(
-            &raw_value,
-            datetime::IntervalShorthandParseKey {
-                ..Default::default()
-            },
-            Some(precision_low),
-        )?;
+        let pdt = Self::parse_interval_string(&raw_value, Some(precision_low))?;
 
         Ok(Expr::Value(Value::Interval(IntervalValue {
             value: raw_value,
@@ -902,7 +890,6 @@ impl Parser {
     /// ```
     pub fn parse_interval_string(
         value: &str,
-        key: datetime::IntervalShorthandParseKey,
         ambiguous_resolver: Option<DateTimeField>,
     ) -> Result<ParsedDateTime, ParserError> {
         if value.is_empty() {
@@ -911,29 +898,7 @@ impl Parser {
             ));
         }
 
-        let mut vvt = Vec::new();
-
-        let vs = value.trim().split_whitespace().collect::<Vec<&str>>();
-        for s in vs {
-            vvt.push(datetime::tokenize_interval(s)?);
-        }
-
-        datetime::build_parsed_datetime_from_vvt(&vvt, value, ambiguous_resolver)
-
-        // let toks = datetime::tokenize_interval(value)?;
-
-        // if Self::contains_date_time_str(value)? {
-        //     return datetime::build_parsed_datetime_from_datetime_str(&toks, value);
-        // }
-
-        // let mut key = key;
-
-        // // If key has None values for all fields in its key, fill in its fields.
-        // if let (None, None, None) = (key.ym, key.d, key.hms) {
-        //     key = datetime::determine_interval_parse_heads(value, ambiguous_resolver)?;
-        // };
-
-        // datetime::build_parsed_datetime_shorthand(&toks, key, value)
+        datetime::build_parsed_datetime(value, ambiguous_resolver)
     }
 
     pub fn parse_timestamp_string(
@@ -948,13 +913,7 @@ impl Parser {
 
         let (ts_string, tz_string) = datetime::split_timestamp_string(value);
 
-        let parse_key = datetime::IntervalShorthandParseKey {
-            ym: Some(DateTimeField::Year),
-            hms: Some(DateTimeField::Hour),
-            ..Default::default()
-        };
-
-        let mut pdt = Self::parse_interval_string(ts_string, parse_key, None)?;
+        let mut pdt = Self::parse_interval_string(ts_string, None)?;
         if !parse_timezone || tz_string.is_empty() {
             return Ok(pdt);
         }

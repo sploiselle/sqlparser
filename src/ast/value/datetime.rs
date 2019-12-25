@@ -80,6 +80,7 @@ impl IntervalValue {
 
                 months += m.unwrap_or(0) as i64;
 
+                // Poatgres treats months as having 30 days.
                 let s_n = m_f.unwrap_or(0) * 30 * seconds_multiplier(Day) as i64;
 
                 seconds += s_n as i128 / 1_000_000_000;
@@ -112,12 +113,13 @@ impl IntervalValue {
             .precision_high
             .clone()
             .into_iter()
-            .take_while(|f| f <= min_field)
+            .take_while(|f| f <= &Second)
         {
             add_field(field);
         }
 
-        match *min_field {
+        // Round fields based on min_field.
+        match self.precision_low {
             Year => {
                 months -= months % 12;
                 seconds = 0;
@@ -167,7 +169,6 @@ impl IntervalValue {
 
         if nanos < 0 && seconds > 0 {
             if let Some(n) = 1_000_000_000_i64.checked_add(nanos) {
-                println!("moving nanos to second neg");
                 nanos = n;
                 seconds -= 1;
             } else {
@@ -175,7 +176,6 @@ impl IntervalValue {
             }
         } else if nanos > 0 && seconds < 0 {
             if let Some(n) = 1_000_000_000_i64.checked_sub(nanos) {
-                println!("moving nanos to second pos");
                 nanos = -n;
                 seconds += 1;
             } else {
