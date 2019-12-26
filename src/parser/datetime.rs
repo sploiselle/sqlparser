@@ -242,7 +242,7 @@ pub(crate) fn determine_interval_parse_heads(
 ) -> Result<IntervalShorthandParseKey, ParserError> {
     // Determining the {H:M:S.NS} portion of the string is always the same, so
     // this subroutine is useful in all conditions where you need to determine it.
-    let lead_hms_determ = |s: &str| -> Result<Option<DateTimeField>, ParserError> {
+    let sql_standard_hms_determ = |s: &str| -> Result<Option<DateTimeField>, ParserError> {
         let mut z = s.chars().peekable();
 
         if trim_leading_colons_sign_numbers(&mut z).is_err() {
@@ -292,7 +292,7 @@ pub(crate) fn determine_interval_parse_heads(
         3 => Ok(IntervalShorthandParseKey {
             ym: Some(DateTimeField::Year),
             d: Some(DateTimeField::Day),
-            hms: lead_hms_determ(v[2])?,
+            hms: sql_standard_hms_determ(v[2])?,
         }),
         // Implies {?}{?}{...}
         2 => {
@@ -329,7 +329,7 @@ pub(crate) fn determine_interval_parse_heads(
             Ok(IntervalShorthandParseKey {
                 ym: lead_ym,
                 d: lead_d,
-                hms: lead_hms_determ(v[1])?,
+                hms: sql_standard_hms_determ(v[1])?,
             })
         }
         1 => {
@@ -350,7 +350,7 @@ pub(crate) fn determine_interval_parse_heads(
                 }),
                 // Implies {}{}{...}
                 Some(_) => Ok(IntervalShorthandParseKey {
-                    hms: lead_hms_determ(interval_str)?,
+                    hms: sql_standard_hms_determ(interval_str)?,
                     ..Default::default()
                 }),
                 // Implies {?}{?}{?}, ambiguous case.
@@ -550,14 +550,22 @@ pub(crate) enum IntervalToken {
     TimeUnit(String),
 }
 
+// Interval strings can be presented in one of two formats:
+// - SQL Standard, e.g. `1-2 3 4:5:6.7`
+// - PostgreSQL, e.g. `1 year 2 months 3 days`
+// This enum is used to indicate which type of parsing to use and encodes a
+// DateTimeField, which indicates "where" you should begin parsing the
+// associated tokens w/r/t their respective syntax.
 enum IntervalPartFormat {
     SQLStandard(DateTimeField),
     PostgreSQL(DateTimeField),
 }
 
+// AnnotatedIntervalPart contains the tokens to be parsed, as well as the
+// format they should be parsed as.
 struct AnnotatedIntervalPart {
-    pub fmt: IntervalPartFormat,
     pub tokens: std::vec::Vec<IntervalToken>,
+    pub fmt: IntervalPartFormat,
 }
 
 // build_parsed_datetime converts the string portion of an interval (`value`)
@@ -588,39 +596,45 @@ pub(crate) fn build_parsed_datetime(
 
     while let Some(part) = value_parts.next() {
         let mut fmt = determine_format_w_datetimefield(&part, value)?;
-        // If cannot discern key of this element, try to infer key.
+        // If you cannot determine the format of this part, try to infer its format.
         if fmt.is_none() {
-            if let Some(next_part) = value_parts.peek() {
-                // Determine key of next element of value_vector.
+            // Start by trying to determine the format of the subsequent part.
+            if let Some(next_part) = value_parts.next() {
                 let next_fmt = determine_format_w_datetimefield(&next_part, value)?;
                 fmt = match next_fmt {
                     Some(IntervalPartFormat::SQLStandard(f)) => {
+                        // We can capture these annotated tokens because execution is
+                        // transitive.
+                        annotated_parts.push(AnnotatedIntervalPart {
+                            fmt: IntervalPartFormat::SQLStandard(f),
+                            tokens: next_part.clone(),
+                        });
                         match f {
                             Year | Month | Day => None,
-                            // If next key is shorthand and represents Hour, Minute, or Second
-                            // you can infer that this component is Day, which is allowed
-                            // to be parsed with a fractiona
+                            // If next part is formatted as SQL Standard and has a
+                            // first element of Hour, Minute, or Second, you can infer
+                            // that this part is Day. Because this part can use a
+                            // fraction, it should be parsed as PostgreSQL.
                             _ => Some(IntervalPartFormat::PostgreSQL(Day)),
                         }
                     }
-                    // This represents cases like `INTERVAL '1 day'`. This token should be
-                    // consumed and not parsed as its own entity, which gets taken care of
-                    // by if let Some(nvt) = value_vector.next()
-                    Some(IntervalPartFormat::PostgreSQL(_)) => {
-                        value_parts.next();
-                        next_fmt
-                    }
+                    // This represents cases like `INTERVAL '1 day'`, where `day` is
+                    // `next_part`. `next_part` should not be captured because its
+                    // only use is determining the format of its preceding part.
+                    Some(IntervalPartFormat::PostgreSQL(_)) => next_fmt,
                     None => None,
                 }
             }
-            // If you could not infer key from next component, attempt to use ambiguous_resolver,
-            // which in consequence is something like DAY in INTERVAL '1' DAY.
+            // If you could not infer the format from next component, attempt to use
+            // `ambiguous_resolver`, which in consequence is the equivalent of DAY in
+            // INTERVAL '1' DAY.
             if fmt.is_none() && ambiguous_resolver.is_some() {
                 fmt = Some(IntervalPartFormat::PostgreSQL(ambiguous_resolver.unwrap()));
                 ambiguous_resolver = None;
             } else if fmt.is_none() {
                 return parser_err!(
-                    "Invalid INTERVAL '{}': add explicit time components, e.g. '1 day'",
+                    "Invalid: INTERVAL '{}'; cannot determine format of all parts. Add \
+                     explicit time components, e.g. INTERVAL '1 day'",
                     value
                 );
             }
@@ -637,7 +651,7 @@ pub(crate) fn build_parsed_datetime(
                 build_parsed_datetime_sql_standard(&ap.tokens, f, value, &mut pdt)?
             }
             IntervalPartFormat::PostgreSQL(f) => {
-                build_parsed_datetime_from_datetime_str(&ap.tokens, f, value, &mut pdt)?
+                build_parsed_datetime_pg(&ap.tokens, f, value, &mut pdt)?
             }
         }
     }
@@ -645,6 +659,9 @@ pub(crate) fn build_parsed_datetime(
     Ok(pdt)
 }
 
+// determine_format_w_datetimefield determines the format of the interval part,
+// whether it is in SQLStandard, PostgreSQL, or an ambiguous format (None).
+// IntervalPartFormat also encodes the greatest DateTimeField in the token.
 fn determine_format_w_datetimefield(
     vt: &Vec<IntervalToken>,
     interval_str: &str,
@@ -653,8 +670,8 @@ fn determine_format_w_datetimefield(
     use IntervalPartFormat::*;
     use IntervalToken::*;
 
-    // Determine the leading component of the House:Minute:Second.Nano portion.
-    let lead_hms_determ =
+    // Determine the leading component of the SQLStandard's H:M:S.NS part.
+    let sql_standard_hms_determ =
         |v: &Vec<IntervalToken>| -> Result<Option<IntervalPartFormat>, ParserError> {
             let mut z = v.iter().peekable();
 
@@ -668,7 +685,7 @@ fn determine_format_w_datetimefield(
                 // Implies {?:...}
                 Some(Colon) => {
                     if let Some(Num(_)) = z.peek() {
-                        println!("lead_hms_determ clearing number 2");
+                        println!("sql_standard_hms_determ clearing number 2");
                         z.next();
                     }
                     match z.peek() {
@@ -692,8 +709,9 @@ fn determine_format_w_datetimefield(
                 }
             }
         };
-
-    let datetime_str_determ = |f: &str| -> Result<Option<IntervalPartFormat>, ParserError> {
+    // Determine the DateTimeField represented by a TimeUnit, which is only applicable to
+    // PostgreSQL-style interval strings.
+    let postgresql_determ = |f: &str| -> Result<Option<IntervalPartFormat>, ParserError> {
         match f {
             "YEAR" | "YEARS" => Ok(Some(PostgreSQL(Year))),
             "MONTH" | "MONTHS" => Ok(Some(PostgreSQL(Month))),
@@ -716,16 +734,27 @@ fn determine_format_w_datetimefield(
                 Some(Dash) => Ok(Some(SQLStandard(Year))),
                 // Implies {?}{?}{?}, ambiguous case.
                 Some(Dot) | None => Ok(None),
-                Some(TimeUnit(f)) => datetime_str_determ(f),
+                // Implies {Num}{TimeUnit}
+                Some(TimeUnit(f)) => postgresql_determ(f),
                 // Implies {}{}{...}
-                Some(_) => Ok(lead_hms_determ(vt)?),
+                Some(_) => Ok(sql_standard_hms_determ(vt)?),
             }
         }
-        Some(TimeUnit(f)) => datetime_str_determ(f),
-        _ => Ok(lead_hms_determ(vt)?),
+        // Implies {TimeUnit}, used to disambiguate cases like '1 day'.
+        Some(TimeUnit(f)) => postgresql_determ(f),
+        // Implied {}{}{(+|-):...} or error.
+        _ => Ok(sql_standard_hms_determ(vt)?),
     }
 }
 
+// build_parsed_datetime_sql_standard fills a ParsedDateTime's fields when encountering
+// SQL standard-style interval parts, e.g. `1-2` for Y-M `4:5:6.7` for H:M:S.NS.
+// Note that:
+// - SQL-standard style groups ({Y-M}{D}{H:M:S.NS}) require that no fields in the group
+//   have been modified, and do not allow any fields to be modified afterward.
+// - Single digits, e.g. `3` in `3 4:5:6.7` could be parsed as SQL standard tokens, but
+//   end up being parsed as PostgreSQL-style tokens because of their greater expressivity,
+//   in that they allow fractions, and are otherwise equivalent.
 fn build_parsed_datetime_sql_standard(
     v: &Vec<IntervalToken>,
     leading_field: DateTimeField,
@@ -734,6 +763,36 @@ fn build_parsed_datetime_sql_standard(
 ) -> Result<(), ParserError> {
     use DateTimeField::*;
     use IntervalToken::*;
+
+    // Ensure that no fields have been previously modified.
+    match leading_field {
+        Year | Month => {
+            if pdt.year.is_some() || pdt.month.is_some() {
+                return parser_err!(
+                    "Invalid INTERVAL '{}'; YEAR or MONTH field set twice.",
+                    value
+                );
+            }
+        }
+        Day => {
+            if pdt.day.is_some() {
+                return parser_err!("Invalid INTERVAL '{}'; DAY field set twice.", value);
+            }
+        }
+        // Hour Minute Second
+        _ => {
+            if pdt.hour.is_some()
+                || pdt.minute.is_some()
+                || pdt.second.is_some()
+                || pdt.nano.is_some()
+            {
+                return parser_err!(
+                    "Invalid INTERVAL '{}'; HOUR, MINUTE, SECOND, or NS field set twice.",
+                    value
+                );
+            }
+        }
+    }
 
     let mut actual = v.iter().peekable();
     let expected = potential_interval_tokens(leading_field);
@@ -841,9 +900,7 @@ fn build_parsed_datetime_sql_standard(
     }
     println!("Exited loop in");
 
-    // Close all fields in group from further modification by
-    // build_parsed_datetime_sql_standard or
-    // build_parsed_datetime_from_datetime_str.
+    // Do not allow any fields in the group to be modified afterward.
     match leading_field {
         Year | Month => {
             if pdt.year.is_none() {
@@ -878,7 +935,13 @@ fn build_parsed_datetime_sql_standard(
     Ok(())
 }
 
-fn build_parsed_datetime_from_datetime_str(
+// build_parsed_datetime_pg fills a ParsedDateTime's fields when encountering
+// PostgreSQL-style interval parts, e.g. `1 month`. Note that:
+// - This function only meaningfully parses the numerical component of the string,
+//   and relies on determining the DateTimeField component from AnnotatedIntervalPart.
+// - Only PostgreSQL-style parts can use fractional components in positions other
+//   than seconds, e.g. `1.5 months`.
+fn build_parsed_datetime_pg(
     tokens: &[IntervalToken],
     time_unit: DateTimeField,
     value: &str,
@@ -886,14 +949,12 @@ fn build_parsed_datetime_from_datetime_str(
 ) -> Result<(), ParserError> {
     use IntervalToken::*;
 
-    println!(
-        "build_parsed_datetime_from_datetime_str time_unit {}",
-        time_unit
-    );
+    println!("build_parsed_datetime_pg time_unit {}", time_unit);
 
     let mut actual = tokens.iter().peekable();
     // We remove all spaces during tokenization, so TimeUnit only shows up if
-    // there is no space between the number and the TimeUnit.
+    // there is no space between the number and the TimeUnit, e.g. `1day`,
+    // which PostgreSQL allows.
     let expected = vec![Num(0), Dot, Nanos(0), TimeUnit(String::default())];
 
     // expected_i lets us skip around the values in expected.
@@ -903,9 +964,11 @@ fn build_parsed_datetime_from_datetime_str(
     let mut frac_buf = 0_i64;
 
     let sign = trim_chars_return_sign(&mut actual);
+    println!("sign {}", sign);
 
     while let Some(atok) = actual.peek() {
         if let Some(etok) = expected.get(expected_i) {
+            println!("expected_i {}", expected_i);
             match (atok, etok) {
                 (Num(n), Num(_)) => {
                     println!("Got int {}", n);
@@ -913,11 +976,11 @@ fn build_parsed_datetime_from_datetime_str(
                     num_buf = *n;
 
                     match actual.peek() {
+                        // Stop processing number.
+                        None | Some(TimeUnit(_)) => break,
                         Some(Dot) => {
                             println!("I see a dot up next");
                         }
-                        // Stop processing number.
-                        None | Some(TimeUnit(_)) => break,
                         Some(_) => {
                             return parser_err!("Invalid char in interval {}", value);
                         }
@@ -944,10 +1007,25 @@ fn build_parsed_datetime_from_datetime_str(
 
                     frac_buf = *n;
                 }
-                (_, _) => return parser_err!("Invalid INTERVAL: while let Some(atok)  {}", value),
+                (provided, expected) => {
+                    return parser_err!(
+                        "Invalid: INTERVAL '{}' ({}); provided {:?} but expected {:?}",
+                        value,
+                        time_unit,
+                        provided,
+                        expected,
+                    )
+                }
             }
+        } else {
+            return parser_err!(
+                "Invalid: INTERVAL '{}' ({}); provided {:?} but expected None",
+                value,
+                time_unit,
+                atok
+            );
         }
-        // Advance expected_i to next token with circular behavior.
+        // Advance expected to the next token.
         expected_i += 1;
     }
 
@@ -980,7 +1058,7 @@ fn build_parsed_datetime_from_datetime_str(
         }
         _ => {
             return parser_err!(
-                "Invalid INTERVAL '{}'; {} field set twice.",
+                "Invalid: INTERVAL '{}'; {} field set twice.",
                 value,
                 time_unit
             );
@@ -990,6 +1068,8 @@ fn build_parsed_datetime_from_datetime_str(
     Ok(())
 }
 
+// Trims tokens equivalent to regex (:*(+|-)?) and returns a value reflecting
+// the expressed sign: 1 for positive, -1 for negative.
 fn trim_chars_return_sign(
     z: &mut std::iter::Peekable<std::slice::Iter<'_, IntervalToken>>,
 ) -> i128 {
