@@ -420,6 +420,61 @@ impl fmt::Display for ParsedDateTime {
     }
 }
 
+impl ParsedDateTime {
+    pub fn write_field_iff_none(
+        &mut self,
+        d: DateTimeField,
+        v: Option<i128>,
+        f: Option<i64>,
+    ) -> Result<(), &'static str> {
+        use DateTimeField::*;
+
+        match d {
+            Year if self.year.is_none() => {
+                self.year = v;
+                self.year_frac = f;
+            }
+            Month if self.month.is_none() => {
+                self.month = v;
+                self.month_frac = f;
+            }
+            Day if self.day.is_none() => {
+                self.day = v;
+                self.day_frac = f;
+            }
+            Hour if self.hour.is_none() => {
+                self.hour = v;
+                self.hour_frac = f;
+            }
+            Minute if self.minute.is_none() => {
+                self.minute = v;
+                self.minute_frac = f;
+            }
+            Second => {
+                if v.is_some() {
+                    if self.second.is_none() {
+                        self.second = v;
+                    } else {
+                        return Err("Some field set twice");
+                    }
+                }
+
+                if f.is_some() {
+                    if self.nano.is_none() {
+                        self.nano = f;
+                    } else {
+                        return Err("Some field set twice");
+                    }
+                }
+            }
+            _ => {
+                return Err("Some field set twice");
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub enum DateTimeField {
     Year,
